@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DimensionMessenger Demo</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <div class="phone-frame">
+        <header class="chat-header">
+          <div>
+            <div class="chat-title">樱岛麻衣</div>
+            <div class="chat-subtitle">沉浸式二次元聊天 Demo</div>
+          </div>
+          <button id="clearBtn" class="ghost-button" type="button">清空记录</button>
+        </header>
+
+        <main id="messageList" class="message-list"></main>
+
+        <div id="typingIndicator" class="typing-indicator hidden">
+          樱岛麻衣 正在输入...
+        </div>
+
+        <footer class="chat-input-bar">
+          <input id="messageInput" type="text" placeholder="输入消息，和樱岛麻衣聊聊天..." maxlength="1000" />
+          <button id="sendBtn" type="button">发送</button>
+        </footer>
+      </div>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
