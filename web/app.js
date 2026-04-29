@@ -19,6 +19,10 @@ const conversationTime = document.getElementById('conversationTime');
 const momentInput = document.getElementById('momentInput');
 const postMomentBtn = document.getElementById('postMomentBtn');
 const momentsList = document.getElementById('momentsList');
+const notificationToast = document.getElementById('notificationToast');
+const notificationAvatar = document.getElementById('notificationAvatar');
+const notificationTitle = document.getElementById('notificationTitle');
+const notificationBody = document.getElementById('notificationBody');
 
 const state = {
   character: {
@@ -37,6 +41,9 @@ const state = {
   momentBusy: false,
   lastVisibleMessageTime: null,
   moments: [],
+  unreadChat: false,
+  unreadMoments: false,
+  toastTimer: null,
 };
 
 const proactiveDelayRange = {
@@ -211,6 +218,48 @@ function setHeader(title, subtitle = '') {
   chatSubtitle.textContent = subtitle;
 }
 
+function updateUnreadBadges() {
+  const messagesTab = document.querySelector('.bottom-tab[data-view="messages"]');
+  const momentsTab = document.querySelector('.bottom-tab[data-view="moments"]');
+
+  messagesTab?.classList.toggle('has-unread', state.unreadChat && state.currentView !== 'messages' && state.currentView !== 'chat');
+  momentsTab?.classList.toggle('has-unread', state.unreadMoments && state.currentView !== 'moments');
+  maiConversation.classList.toggle('has-unread', state.unreadChat);
+}
+
+function setUnread(kind, value) {
+  if (kind === 'chat') {
+    state.unreadChat = value;
+  }
+  if (kind === 'moments') {
+    state.unreadMoments = value;
+  }
+  updateUnreadBadges();
+}
+
+function getMessagePreview(message) {
+  if (!message) return '点开看看';
+  if (message.type === 'sticker') return '[表情包]';
+  if (message.type === 'image') return '[图片]';
+  return message.content || '点开看看';
+}
+
+function showNotification({ title, body, avatar, onClick }) {
+  window.clearTimeout(state.toastTimer);
+  notificationTitle.textContent = title;
+  notificationBody.textContent = body;
+  notificationAvatar.src = avatar || state.character.avatar || 'https://placehold.co/64x64?text=AI';
+  notificationToast.onclick = () => {
+    notificationToast.classList.remove('show');
+    onClick?.();
+  };
+  notificationToast.classList.add('show');
+
+  state.toastTimer = window.setTimeout(() => {
+    notificationToast.classList.remove('show');
+  }, 5200);
+}
+
 function setMainView(viewName) {
   state.currentView = viewName;
   chatView.classList.add('hidden');
@@ -231,11 +280,16 @@ function setMainView(viewName) {
     moments: ['朋友圈', '动态'],
     profile: ['我的', '本地资料'],
   };
+  if (viewName === 'moments') {
+    setUnread('moments', false);
+  }
   setHeader(...titles[viewName]);
+  updateUnreadBadges();
 }
 
 function openChat() {
   state.currentView = 'chat';
+  setUnread('chat', false);
   appViews.forEach((view) => view.classList.remove('active-view'));
   chatView.classList.remove('hidden');
   bottomTabs.classList.add('hidden');
@@ -578,6 +632,13 @@ async function checkProactiveMessage() {
       if (state.currentView !== 'chat') {
         state.messages.push(...messages);
         updateConversationSummary();
+        setUnread('chat', true);
+        showNotification({
+          title: state.character.name,
+          body: getMessagePreview(messages[messages.length - 1]),
+          avatar: state.character.avatar,
+          onClick: openChat,
+        });
         playMessageSound('receive');
         return;
       }
@@ -619,6 +680,7 @@ async function checkMomentProactive() {
   try {
     const result = await requestMomentProactive();
     if (!result.skipped) {
+      const shouldNotify = state.currentView !== 'moments' && (result.comment || result.moment);
       if (result.comment) {
         console.info('朋友圈 AI 已评论', result.comment);
       }
@@ -626,6 +688,19 @@ async function checkMomentProactive() {
         console.info('朋友圈 AI 已发动态', result.moment);
       }
       await refreshMoments();
+      if (shouldNotify) {
+        const body = result.comment?.content || result.moment?.content || '朋友圈有新动态';
+        setUnread('moments', true);
+        showNotification({
+          title: result.comment ? '朋友圈有新评论' : `${state.character.name}发了朋友圈`,
+          body,
+          avatar: state.character.avatar,
+          onClick: () => {
+            setMainView('moments');
+            refreshMoments().catch((error) => console.warn(error));
+          },
+        });
+      }
     } else {
       console.info('朋友圈 AI 暂不评论也不发动态', result);
     }

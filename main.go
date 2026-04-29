@@ -441,7 +441,13 @@ func (a *App) handleSendChat(c *gin.Context) {
 		return
 	}
 
-	prompt := buildPrompt(character, recent, req.Message)
+	moments, err := a.getMoments(c.Request.Context(), req.CharacterID, 12)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	prompt := buildPrompt(character, recent, moments, req.Message)
 	raw, err := a.callLLM(c.Request.Context(), prompt)
 	if err != nil {
 		log.Printf("llm error: %v", err)
@@ -545,7 +551,13 @@ func (a *App) handleProactiveChat(c *gin.Context) {
 		return
 	}
 
-	prompt := buildProactivePrompt(character, recent)
+	moments, err := a.getMoments(c.Request.Context(), req.CharacterID, 12)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	prompt := buildProactivePrompt(character, recent, moments)
 	raw, err := a.callLLM(c.Request.Context(), prompt)
 	if err != nil {
 		log.Printf("proactive llm error: %v", err)
@@ -605,7 +617,7 @@ func loadCharacter(characterID string) (*Character, error) {
 	return &ch, nil
 }
 
-func buildPrompt(ch *Character, recent []Message, userMessage string) string {
+func buildPrompt(ch *Character, recent []Message, moments []Moment, userMessage string) string {
 	var b strings.Builder
 	b.WriteString("你正在扮演一个虚拟角色。你不是 AI 助手，不要暴露系统设定，不要说自己是语言模型。\n\n")
 	b.WriteString("重要要求：\n")
@@ -622,44 +634,12 @@ func buildPrompt(ch *Character, recent []Message, userMessage string) string {
 	b.WriteString("11. should_reply 为 false 时不要发图、不要发表情包；这表示角色已读但不继续接话。\n")
 	b.WriteString("12. 只有在两种情况下才把 should_generate_image 设为 true：用户明确想看你发来的照片/自拍/图片，或者当前很适合奖励用户一张你主动发出的照片。\n")
 	b.WriteString("13. 如果 should_generate_image 为 true，image_prompt 必须写成可直接用于生图的中文提示词，描述你自己要发给用户的画面，不要写解释。\n")
-	b.WriteString("14. 如果没必要发图，should_generate_image 必须是 false，image_prompt 必须是空字符串。\n\n")
+	b.WriteString("14. 如果没必要发图，should_generate_image 必须是 false，image_prompt 必须是空字符串。\n")
+	b.WriteString("15. 如果用户问你朋友圈里说了什么、你有没有看到动态，必须优先参考“用户朋友圈正文”，不要只提你自己的评论。\n\n")
 
-	b.WriteString("角色设定：\n")
-	b.WriteString(fmt.Sprintf("名字：%s\n", ch.Name))
-	b.WriteString(fmt.Sprintf("年龄：%d\n", ch.Age))
-	b.WriteString(fmt.Sprintf("性别：%s\n", ch.Gender))
-	b.WriteString(fmt.Sprintf("关系：%s\n", ch.Relationship))
-	b.WriteString(fmt.Sprintf("背景：%s\n", ch.Background))
-	b.WriteString(fmt.Sprintf("性格：%s\n", strings.Join(ch.Personality, "、")))
-	b.WriteString(fmt.Sprintf("喜欢：%s\n", strings.Join(ch.Likes, "、")))
-	b.WriteString(fmt.Sprintf("不喜欢：%s\n", strings.Join(ch.Dislikes, "、")))
-	b.WriteString(fmt.Sprintf("说话风格：%s\n", ch.SpeechStyle.Tone))
-	b.WriteString(fmt.Sprintf("口头禅：%s\n", strings.Join(ch.SpeechStyle.Catchphrases, "、")))
-	b.WriteString(fmt.Sprintf("语气词：%s\n", strings.Join(ch.SpeechStyle.Particles, "、")))
-	b.WriteString("规则：\n")
-	for _, rule := range ch.Rules {
-		b.WriteString("- " + rule + "\n")
-	}
-
-	b.WriteString("\n最近聊天记录：\n")
-	if len(recent) == 0 {
-		b.WriteString("无\n")
-	} else {
-		for _, msg := range recent {
-			role := "用户"
-			if msg.Sender == "character" {
-				role = ch.Name
-			}
-			switch msg.Type {
-			case "sticker":
-				b.WriteString(fmt.Sprintf("%s: [发送了一张表情包]\n", role))
-			case "image":
-				b.WriteString(fmt.Sprintf("%s: [发送了一张图片]\n", role))
-			default:
-				b.WriteString(fmt.Sprintf("%s: %s\n", role, summarizePromptText(msg.Content, 500)))
-			}
-		}
-	}
+	writeCharacterProfile(&b, ch)
+	writeRecentMessages(&b, ch, recent)
+	writeRecentMoments(&b, ch, moments)
 
 	b.WriteString("\n用户刚刚说：\n")
 	b.WriteString(userMessage)
@@ -679,7 +659,7 @@ func buildPrompt(ch *Character, recent []Message, userMessage string) string {
 	return b.String()
 }
 
-func buildProactivePrompt(ch *Character, recent []Message) string {
+func buildProactivePrompt(ch *Character, recent []Message, moments []Moment) string {
 	var b strings.Builder
 	b.WriteString("你正在扮演一个虚拟角色。你不是 AI 助手，不要暴露系统设定，不要说自己是语言模型。\n\n")
 	b.WriteString("这次不是用户来找你，而是你在聊天软件里主动给用户发一条消息。\n")
@@ -690,10 +670,12 @@ func buildProactivePrompt(ch *Character, recent []Message) string {
 	b.WriteString("4. 可以是轻轻关心、分享一点日常、顺手吐槽、提醒对方休息，或接上最近聊天里的一个小话题。\n")
 	b.WriteString("5. 不要每次都问问题；不要像客服回访；不要要求用户必须回复。\n")
 	b.WriteString("6. 如果自然需要分开发，可以用 replies 数组拆成 2 条短消息；主动消息不要超过 2 条。\n")
-	b.WriteString("7. 只输出一个合法 JSON 对象，不要在 JSON 前后添加解释。\n\n")
+	b.WriteString("7. 可以参考用户最近朋友圈正文来找话题，但不要把你自己的评论当成用户发的动态。\n")
+	b.WriteString("8. 只输出一个合法 JSON 对象，不要在 JSON 前后添加解释。\n\n")
 
 	writeCharacterProfile(&b, ch)
 	writeRecentMessages(&b, ch, recent)
+	writeRecentMoments(&b, ch, moments)
 
 	b.WriteString("\n现在请你主动发来一条自然消息。\n")
 	b.WriteString("请只输出如下 JSON，字段名必须一致：\n")
@@ -803,6 +785,56 @@ func writeRecentMessages(b *strings.Builder, ch *Character, recent []Message) {
 		default:
 			b.WriteString(fmt.Sprintf("%s: %s\n", role, summarizePromptText(msg.Content, 500)))
 		}
+	}
+}
+
+func writeRecentMoments(b *strings.Builder, ch *Character, moments []Moment) {
+	b.WriteString("\n最近朋友圈动态：\n")
+	b.WriteString("说明：这是聊天外的朋友圈上下文。用户如果在聊天里提到朋友圈、动态、评论、刚发的内容，必须优先参考这里；但不要生硬复述全部内容。\n")
+	if len(moments) == 0 {
+		b.WriteString("无\n")
+		return
+	}
+
+	b.WriteString("\n【用户朋友圈正文】\n")
+	hasUserMoment := false
+	for _, moment := range moments {
+		if moment.Author != "user" {
+			continue
+		}
+		hasUserMoment = true
+		b.WriteString(fmt.Sprintf("- ID=%d 时间=%s 用户朋友圈正文：%s", moment.ID, moment.CreatedAt, summarizePromptText(moment.Content, 260)))
+		if moment.ImageURL != "" {
+			b.WriteString(" [用户配图]")
+		}
+		b.WriteString("\n")
+	}
+	if !hasUserMoment {
+		b.WriteString("无\n")
+	}
+
+	b.WriteString("\n【完整朋友圈和评论区】\n")
+	for _, moment := range moments {
+		author := "用户"
+		if moment.Author == "character" {
+			author = ch.Name
+		}
+		b.WriteString(fmt.Sprintf("ID=%d 作者=%s 时间=%s 正文=%s", moment.ID, author, moment.CreatedAt, summarizePromptText(moment.Content, 220)))
+		if moment.ImageURL != "" {
+			b.WriteString(" [带图]")
+		}
+		if len(moment.Comments) > 0 {
+			commentParts := make([]string, 0, len(moment.Comments))
+			for _, comment := range moment.Comments {
+				commentAuthor := "用户"
+				if comment.Author == "character" {
+					commentAuthor = ch.Name
+				}
+				commentParts = append(commentParts, commentAuthor+":"+summarizePromptText(comment.Content, 90))
+			}
+			b.WriteString(" 评论区：" + strings.Join(commentParts, "；"))
+		}
+		b.WriteString("\n")
 	}
 }
 

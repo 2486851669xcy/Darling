@@ -9,6 +9,14 @@
   <body>
     <div class="app-shell">
       <div class="phone-frame">
+        <button id="notificationToast" class="notification-toast" type="button" aria-live="polite">
+          <img id="notificationAvatar" class="notification-avatar" alt="" />
+          <span class="notification-copy">
+            <span id="notificationTitle" class="notification-title"></span>
+            <span id="notificationBody" class="notification-body"></span>
+          </span>
+        </button>
+
         <header class="app-header">
           <button id="backBtn" class="back-button hidden" type="button">‹</button>
           <div class="header-copy">
