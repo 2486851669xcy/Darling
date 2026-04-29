@@ -19,6 +19,7 @@ const state = {
   isLoading: false,
   proactiveTimer: null,
   proactiveBusy: false,
+  lastVisibleMessageTime: null,
 };
 
 const proactiveDelayRange = {
@@ -27,8 +28,8 @@ const proactiveDelayRange = {
 };
 
 const firstProactiveDelayRange = {
-  min: 20 * 1000,
-  max: 45 * 1000,
+  min: 8 * 1000,
+  max: 15 * 1000,
 };
 
 function getAudioContext() {
@@ -154,6 +155,47 @@ function getAvatarUrl(sender) {
   return state.character.avatar || 'https://placehold.co/64x64?text=AI';
 }
 
+function formatMessageTime(value) {
+  const date = parseMessageDate(value);
+  if (!date) {
+    return '';
+  }
+  return date.toLocaleTimeString('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+}
+
+function parseMessageDate(value) {
+  const date = value ? new Date(value.replace(' ', 'T')) : new Date();
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function shouldShowTimeSeparator(message) {
+  const date = parseMessageDate(message.created_at);
+  if (!date) return false;
+
+  if (!state.lastVisibleMessageTime) {
+    state.lastVisibleMessageTime = date;
+    return true;
+  }
+
+  const diffMs = date.getTime() - state.lastVisibleMessageTime.getTime();
+  if (diffMs > 3 * 60 * 1000) {
+    state.lastVisibleMessageTime = date;
+    return true;
+  }
+  return false;
+}
+
+function createTimeSeparator(message) {
+  const separator = document.createElement('div');
+  separator.className = 'time-separator';
+  separator.textContent = formatMessageTime(message.created_at);
+  return separator;
+}
+
 function createBubble(message) {
   const row = document.createElement('div');
   row.className = `message-row ${message.sender}`;
@@ -191,6 +233,7 @@ function createBubble(message) {
 
 function renderMessages(messages) {
   messageList.innerHTML = '';
+  state.lastVisibleMessageTime = null;
 
   if (!messages.length) {
     const empty = document.createElement('div');
@@ -201,6 +244,9 @@ function renderMessages(messages) {
   }
 
   messages.forEach((message) => {
+    if (shouldShowTimeSeparator(message)) {
+      messageList.appendChild(createTimeSeparator(message));
+    }
     messageList.appendChild(createBubble(message));
   });
   scrollToBottom();
@@ -210,6 +256,9 @@ function appendMessage(message) {
   const empty = messageList.querySelector('.empty-state');
   if (empty) {
     empty.remove();
+  }
+  if (shouldShowTimeSeparator(message)) {
+    messageList.appendChild(createTimeSeparator(message));
   }
   messageList.appendChild(createBubble(message));
   scrollToBottom();
@@ -257,15 +306,24 @@ function randomDelay({ min, max }) {
 function scheduleProactiveMessage(delayMs) {
   window.clearTimeout(state.proactiveTimer);
   const delay = Number.isFinite(delayMs) ? delayMs : randomDelay(proactiveDelayRange);
+  console.info(`主动消息检查已安排，约 ${Math.round(delay / 1000)} 秒后执行`);
   state.proactiveTimer = window.setTimeout(checkProactiveMessage, delay);
 }
 
 async function checkProactiveMessage() {
-  if (document.hidden || state.isLoading || state.proactiveBusy || messageInput.value.trim()) {
+  const typedText = messageInput.value.trim();
+  if (document.hidden || state.isLoading || state.proactiveBusy || typedText) {
+    console.info('主动消息检查跳过', {
+      hidden: document.hidden,
+      loading: state.isLoading,
+      busy: state.proactiveBusy,
+      typing: Boolean(typedText),
+    });
     scheduleProactiveMessage();
     return;
   }
 
+  console.info('主动消息检查开始');
   state.proactiveBusy = true;
   typingIndicator.classList.remove('hidden');
 
@@ -273,6 +331,7 @@ async function checkProactiveMessage() {
     const result = await requestProactiveMessage();
     const messages = Array.isArray(result.messages) ? result.messages : [];
     if (!result.skipped && messages.length > 0) {
+      console.info(`主动消息触发成功，共 ${messages.length} 条`);
       setLoading(true);
       await appendMessagesSequentially(messages, { playReceiveSound: true });
     } else if (result.next_check_after_seconds) {
@@ -280,9 +339,11 @@ async function checkProactiveMessage() {
       console.info(`主动消息暂不触发，约 ${result.next_check_after_seconds} 秒后重试`);
       scheduleProactiveMessage((result.next_check_after_seconds * 1000) + jitter);
       return;
+    } else {
+      console.info('主动消息暂不触发，后端未要求具体重试时间', result);
     }
   } catch (error) {
-    console.warn(error);
+    console.warn('主动消息检查失败', error);
   } finally {
     state.proactiveBusy = false;
     if (state.isLoading) {
@@ -304,6 +365,7 @@ async function handleSend() {
     sender: 'user',
     type: 'text',
     content: text,
+    created_at: new Date().toISOString(),
   };
   appendMessage(optimistic);
   playMessageSound('send');

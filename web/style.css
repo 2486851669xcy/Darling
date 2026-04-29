@@ -94,6 +94,16 @@ body {
   justify-content: flex-start;
 }
 
+.time-separator {
+  width: 100%;
+  margin: 2px auto 12px;
+  padding: 0;
+  color: #b8bdc5;
+  font-size: 10px;
+  line-height: 1;
+  text-align: center;
+}
+
 .avatar {
   width: 36px;
   height: 36px;
