@@ -7,6 +7,15 @@ const clearBtn = document.getElementById('clearBtn');
 const typingIndicator = document.getElementById('typingIndicator');
 const chatTitle = document.querySelector('.chat-title');
 const chatSubtitle = document.querySelector('.chat-subtitle');
+const backBtn = document.getElementById('backBtn');
+const chatView = document.getElementById('chatView');
+const appViews = document.querySelectorAll('.app-view');
+const bottomTabs = document.querySelector('.bottom-tabs');
+const tabButtons = document.querySelectorAll('.bottom-tab');
+const maiConversation = document.getElementById('maiConversation');
+const maiContact = document.getElementById('maiContact');
+const conversationPreview = document.getElementById('conversationPreview');
+const conversationTime = document.getElementById('conversationTime');
 
 const state = {
   character: {
@@ -14,6 +23,8 @@ const state = {
     avatar: '',
     user_avatar: '',
   },
+  messages: [],
+  currentView: 'messages',
   audioContext: null,
   audioReady: null,
   isLoading: false,
@@ -148,6 +159,46 @@ function scrollToBottom() {
   messageList.scrollTop = messageList.scrollHeight;
 }
 
+function setHeader(title, subtitle = '') {
+  chatTitle.textContent = title;
+  chatSubtitle.textContent = subtitle;
+}
+
+function setMainView(viewName) {
+  state.currentView = viewName;
+  chatView.classList.add('hidden');
+  bottomTabs.classList.remove('hidden');
+  backBtn.classList.add('hidden');
+  clearBtn.classList.add('hidden');
+
+  appViews.forEach((view) => {
+    view.classList.toggle('active-view', view.id === `${viewName}View`);
+  });
+  tabButtons.forEach((button) => {
+    button.classList.toggle('active', button.dataset.view === viewName);
+  });
+
+  const titles = {
+    messages: ['消息', 'DimensionMessenger'],
+    contacts: ['联系人', '只有真正重要的人'],
+    moments: ['朋友圈', '动态'],
+    profile: ['我的', '本地资料'],
+  };
+  setHeader(...titles[viewName]);
+}
+
+function openChat() {
+  state.currentView = 'chat';
+  appViews.forEach((view) => view.classList.remove('active-view'));
+  chatView.classList.remove('hidden');
+  bottomTabs.classList.add('hidden');
+  backBtn.classList.remove('hidden');
+  clearBtn.classList.remove('hidden');
+  setHeader(state.character.name, state.character.relationship || '沉浸式二次元聊天 Demo');
+  renderMessages(state.messages);
+  messageInput.focus();
+}
+
 function getAvatarUrl(sender) {
   if (sender === 'user') {
     return state.character.user_avatar || 'https://placehold.co/64x64?text=U';
@@ -167,9 +218,39 @@ function formatMessageTime(value) {
   });
 }
 
+function formatListTime(value) {
+  const date = parseMessageDate(value);
+  if (!date) return '';
+
+  const now = new Date();
+  const sameDay = date.toDateString() === now.toDateString();
+  if (sameDay) {
+    return formatMessageTime(value);
+  }
+  return `${date.getMonth() + 1}/${date.getDate()}`;
+}
+
 function parseMessageDate(value) {
   const date = value ? new Date(value.replace(' ', 'T')) : new Date();
   return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function updateConversationSummary(messages = state.messages) {
+  const latest = [...messages].reverse().find((message) => message.sender === 'character' || message.sender === 'user');
+  if (!latest) {
+    conversationPreview.textContent = '点开和她聊天';
+    conversationTime.textContent = '';
+    return;
+  }
+
+  if (latest.type === 'sticker') {
+    conversationPreview.textContent = '[表情包]';
+  } else if (latest.type === 'image') {
+    conversationPreview.textContent = '[图片]';
+  } else {
+    conversationPreview.textContent = latest.content;
+  }
+  conversationTime.textContent = formatListTime(latest.created_at);
 }
 
 function shouldShowTimeSeparator(message) {
@@ -233,22 +314,25 @@ function createBubble(message) {
 
 function renderMessages(messages) {
   messageList.innerHTML = '';
+  state.messages = Array.isArray(messages) ? messages : [];
   state.lastVisibleMessageTime = null;
 
-  if (!messages.length) {
+  if (!state.messages.length) {
     const empty = document.createElement('div');
     empty.className = 'empty-state';
     empty.textContent = '还没有聊天记录，发第一条消息试试吧。';
     messageList.appendChild(empty);
+    updateConversationSummary();
     return;
   }
 
-  messages.forEach((message) => {
+  state.messages.forEach((message) => {
     if (shouldShowTimeSeparator(message)) {
       messageList.appendChild(createTimeSeparator(message));
     }
     messageList.appendChild(createBubble(message));
   });
+  updateConversationSummary();
   scrollToBottom();
 }
 
@@ -257,6 +341,8 @@ function appendMessage(message) {
   if (empty) {
     empty.remove();
   }
+  state.messages.push(message);
+  updateConversationSummary();
   if (shouldShowTimeSeparator(message)) {
     messageList.appendChild(createTimeSeparator(message));
   }
@@ -332,6 +418,12 @@ async function checkProactiveMessage() {
     const messages = Array.isArray(result.messages) ? result.messages : [];
     if (!result.skipped && messages.length > 0) {
       console.info(`主动消息触发成功，共 ${messages.length} 条`);
+      if (state.currentView !== 'chat') {
+        state.messages.push(...messages);
+        updateConversationSummary();
+        playMessageSound('receive');
+        return;
+      }
       setLoading(true);
       await appendMessagesSequentially(messages, { playReceiveSound: true });
     } else if (result.next_check_after_seconds) {
@@ -396,6 +488,19 @@ messageInput.addEventListener('keydown', (event) => {
   }
 });
 
+backBtn.addEventListener('click', () => {
+  setMainView('messages');
+});
+
+maiConversation.addEventListener('click', openChat);
+maiContact.addEventListener('click', openChat);
+
+tabButtons.forEach((button) => {
+  button.addEventListener('click', () => {
+    setMainView(button.dataset.view);
+  });
+});
+
 clearBtn.addEventListener('click', async () => {
   if (!confirm(`要清空和${state.character.name || '角色'}的聊天记录吗？`)) {
     return;
@@ -420,24 +525,29 @@ clearBtn.addEventListener('click', async () => {
 function applyCharacterUI(character) {
   state.character = character;
   document.title = `${character.name} - DimensionMessenger Demo`;
-  chatTitle.textContent = character.name;
-  chatSubtitle.textContent = character.relationship || '沉浸式二次元聊天 Demo';
   typingIndicator.textContent = `${character.name} 正在输入...`;
   messageInput.placeholder = `输入消息，和${character.name}聊聊天...`;
+
+  document.querySelectorAll('.conversation-avatar, .contact-avatar, .moment-avatar').forEach((avatar) => {
+    avatar.src = character.avatar || 'https://placehold.co/64x64?text=AI';
+  });
+  const profileAvatar = document.querySelector('.profile-avatar');
+  profileAvatar.src = character.user_avatar || 'https://placehold.co/72x72?text=U';
+  document.querySelector('.conversation-name').textContent = character.name;
+  document.querySelector('.contact-name').textContent = character.name;
+  document.querySelector('.contact-note').textContent = character.relationship || '联系人';
 }
 
 (async function init() {
   try {
     const [character, messages] = await Promise.all([fetchCharacter(), fetchMessages()]);
     applyCharacterUI(character);
-    renderMessages(messages);
+    state.messages = messages;
+    updateConversationSummary();
+    setMainView('messages');
     scheduleProactiveMessage(randomDelay(firstProactiveDelayRange));
   } catch (error) {
-    renderMessages([]);
-    appendMessage({
-      sender: 'character',
-      type: 'text',
-      content: `初始化失败：${error.message}`,
-    });
+    setMainView('messages');
+    conversationPreview.textContent = `初始化失败：${error.message}`;
   }
 })();

@@ -42,14 +42,19 @@ body {
   border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
-.chat-header {
+.app-header {
   height: 68px;
   background: var(--header);
   border-bottom: 1px solid var(--line);
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 10px;
   padding: 0 16px;
+}
+
+.header-copy {
+  flex: 1;
+  min-width: 0;
 }
 
 .chat-title {
@@ -70,6 +75,210 @@ body {
   border-radius: 10px;
   padding: 8px 12px;
   cursor: pointer;
+}
+
+.back-button {
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 32px;
+  line-height: 1;
+  padding: 0 4px 4px 0;
+  cursor: pointer;
+}
+
+.app-view {
+  display: none;
+  flex: 1;
+  overflow-y: auto;
+  background: #ededed;
+}
+
+.active-view {
+  display: block;
+}
+
+.conversation-list,
+.settings-list {
+  background: #fff;
+}
+
+.conversation-card,
+.contact-row {
+  width: 100%;
+  border: 0;
+  background: #fff;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  text-align: left;
+  cursor: pointer;
+  border-bottom: 1px solid var(--line);
+}
+
+.conversation-avatar,
+.contact-avatar,
+.moment-avatar,
+.profile-avatar {
+  object-fit: cover;
+  background: #fff;
+}
+
+.conversation-avatar,
+.contact-avatar {
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+}
+
+.conversation-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.conversation-name,
+.contact-name {
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.conversation-preview,
+.contact-note,
+.conversation-time,
+.moment-meta,
+.profile-id {
+  color: var(--subtext);
+  font-size: 12px;
+}
+
+.conversation-preview {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-time {
+  align-self: flex-start;
+  margin-top: 3px;
+}
+
+.section-title {
+  padding: 12px 16px 7px;
+  color: var(--subtext);
+  font-size: 12px;
+}
+
+.contact-row span {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.moments-view {
+  background: #fff;
+}
+
+.moments-cover {
+  height: 150px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  padding: 18px;
+  color: #fff;
+  text-align: right;
+  background: linear-gradient(135deg, #6b7280, #1f2937);
+}
+
+.moments-title {
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.moments-subtitle {
+  margin-top: 5px;
+  font-size: 12px;
+  opacity: 0.82;
+}
+
+.moment-card {
+  display: flex;
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.moment-avatar {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  flex: 0 0 38px;
+}
+
+.moment-name {
+  color: #334155;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.moment-body p {
+  margin: 6px 0 8px;
+  color: var(--text);
+  line-height: 1.55;
+  font-size: 14px;
+}
+
+.profile-view {
+  padding-top: 14px;
+}
+
+.profile-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 18px 16px;
+  background: #fff;
+}
+
+.profile-avatar {
+  width: 58px;
+  height: 58px;
+  border-radius: 14px;
+}
+
+.profile-name {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.settings-list {
+  margin-top: 12px;
+}
+
+.settings-list button {
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: #fff;
+  padding: 15px 16px;
+  color: var(--text);
+  text-align: left;
+  font-size: 14px;
+}
+
+.chat-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-view.hidden {
+  display: none;
 }
 
 .message-list {
@@ -205,6 +414,43 @@ body {
 .ghost-button:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+.bottom-tabs {
+  height: 58px;
+  flex: 0 0 58px;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  align-items: center;
+  background: #f7f7f7;
+  border-top: 1px solid var(--line);
+}
+
+.bottom-tabs.hidden {
+  display: none;
+}
+
+.bottom-tab {
+  height: 100%;
+  border: 0;
+  background: transparent;
+  color: #7b818c;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.bottom-tab.active {
+  color: #16a34a;
+}
+
+.tab-icon {
+  font-size: 17px;
+  line-height: 1;
 }
 
 .empty-state {
