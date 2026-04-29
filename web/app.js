@@ -14,7 +14,65 @@ const state = {
     avatar: '',
     user_avatar: '',
   },
+  audioContext: null,
+  audioReady: null,
 };
+
+function getAudioContext() {
+  if (!window.AudioContext && !window.webkitAudioContext) {
+    return null;
+  }
+  if (!state.audioContext) {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    state.audioContext = new AudioContextClass();
+  }
+  return state.audioContext;
+}
+
+function unlockAudio() {
+  const audioContext = getAudioContext();
+  if (!audioContext || audioContext.state !== 'suspended') {
+    return Promise.resolve(audioContext);
+  }
+
+  state.audioReady = audioContext.resume().then(() => audioContext).catch(() => null);
+  return state.audioReady;
+}
+
+async function playTone(frequency, startOffset, duration, volume = 0.045) {
+  const audioContext = await unlockAudio();
+  if (!audioContext || audioContext.state !== 'running') return;
+
+  const oscillator = audioContext.createOscillator();
+  const gain = audioContext.createGain();
+  const start = audioContext.currentTime + startOffset;
+  const end = start + duration;
+
+  oscillator.type = 'sine';
+  oscillator.frequency.setValueAtTime(frequency, start);
+  gain.gain.setValueAtTime(0.0001, start);
+  gain.gain.exponentialRampToValueAtTime(volume, start + 0.012);
+  gain.gain.exponentialRampToValueAtTime(0.0001, end);
+
+  oscillator.connect(gain);
+  gain.connect(audioContext.destination);
+  oscillator.start(start);
+  oscillator.stop(end + 0.02);
+}
+
+function playMessageSound(kind) {
+  if (kind === 'send') {
+    playTone(740, 0, 0.08, 0.11);
+    playTone(1040, 0.075, 0.1, 0.095);
+    return;
+  }
+
+  playTone(520, 0, 0.08, 0.085);
+  playTone(690, 0.085, 0.1, 0.078);
+}
+
+window.addEventListener('pointerdown', unlockAudio, { once: true });
+window.addEventListener('keydown', unlockAudio, { once: true });
 
 async function fetchCharacter() {
   const response = await fetch(`/api/character?character_id=${characterId}`);
@@ -146,12 +204,16 @@ async function handleSend() {
     content: text,
   };
   appendMessage(optimistic);
+  playMessageSound('send');
   messageInput.value = '';
   setLoading(true);
 
   try {
     const result = await sendMessage(text);
     result.messages.forEach((message) => appendMessage(message));
+    if (result.messages.length > 0) {
+      playMessageSound('receive');
+    }
   } catch (error) {
     appendMessage({
       sender: 'character',
