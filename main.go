@@ -56,12 +56,39 @@ type Message struct {
 	CreatedAt   string `json:"created_at"`
 }
 
+type Moment struct {
+	ID          int64           `json:"id"`
+	CharacterID string          `json:"character_id"`
+	Author      string          `json:"author"`
+	Content     string          `json:"content"`
+	ImageURL    string          `json:"image_url"`
+	CreatedAt   string          `json:"created_at"`
+	Comments    []MomentComment `json:"comments"`
+}
+
+type MomentComment struct {
+	ID        int64  `json:"id"`
+	MomentID  int64  `json:"moment_id"`
+	Author    string `json:"author"`
+	Content   string `json:"content"`
+	CreatedAt string `json:"created_at"`
+}
+
 type SendChatRequest struct {
 	CharacterID string `json:"character_id"`
 	Message     string `json:"message"`
 }
 
+type CreateMomentRequest struct {
+	CharacterID string `json:"character_id"`
+	Content     string `json:"content"`
+}
+
 type ProactiveChatRequest struct {
+	CharacterID string `json:"character_id"`
+}
+
+type MomentProactiveRequest struct {
 	CharacterID string `json:"character_id"`
 }
 
@@ -81,6 +108,15 @@ type LLMReply struct {
 	StickerQuery        string   `json:"sticker_query"`
 	ShouldGenerateImage bool     `json:"should_generate_image"`
 	ImagePrompt         string   `json:"image_prompt"`
+}
+
+type MomentAIAction struct {
+	Action              string `json:"action"`
+	MomentID            int64  `json:"moment_id"`
+	Comment             string `json:"comment"`
+	Content             string `json:"content"`
+	ShouldGenerateImage bool   `json:"should_generate_image"`
+	ImagePrompt         string `json:"image_prompt"`
 }
 
 type AIConfig struct {
@@ -126,6 +162,9 @@ func main() {
 
 	r.GET("/api/messages", app.handleGetMessages)
 	r.GET("/api/character", app.handleGetCharacter)
+	r.GET("/api/moments", app.handleGetMoments)
+	r.POST("/api/moments", app.handleCreateMoment)
+	r.POST("/api/moments/proactive", app.handleProactiveMoment)
 	r.POST("/api/chat/send", app.handleSendChat)
 	r.POST("/api/chat/proactive", app.handleProactiveChat)
 	r.POST("/api/messages/clear", app.handleClearMessages)
@@ -194,6 +233,23 @@ CREATE TABLE IF NOT EXISTS sticker_assets (
   last_used_at DATETIME
 );
 CREATE INDEX IF NOT EXISTS idx_sticker_assets_lookup ON sticker_assets(character_id, emotion, created_at);
+CREATE TABLE IF NOT EXISTS moments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  character_id TEXT NOT NULL,
+  author TEXT NOT NULL,
+  content TEXT NOT NULL DEFAULT '',
+  image_url TEXT NOT NULL DEFAULT '',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_moments_character_created ON moments(character_id, created_at);
+CREATE TABLE IF NOT EXISTS moment_comments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  moment_id INTEGER NOT NULL,
+  author TEXT NOT NULL,
+  content TEXT NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_moment_comments_moment_created ON moment_comments(moment_id, created_at);
 `)
 	return err
 }
@@ -238,6 +294,108 @@ func (a *App) handleGetCharacter(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, character)
+}
+
+func (a *App) handleGetMoments(c *gin.Context) {
+	characterID := c.DefaultQuery("character_id", "luna")
+	moments, err := a.getMoments(c.Request.Context(), characterID, 50)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, moments)
+}
+
+func (a *App) handleCreateMoment(c *gin.Context) {
+	var req CreateMomentRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	req.CharacterID = strings.TrimSpace(req.CharacterID)
+	req.Content = strings.TrimSpace(req.Content)
+	if req.CharacterID == "" {
+		req.CharacterID = "luna"
+	}
+	if req.Content == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "content is required"})
+		return
+	}
+
+	moment, err := a.saveMoment(c.Request.Context(), req.CharacterID, "user", req.Content, "")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, moment)
+}
+
+func (a *App) handleProactiveMoment(c *gin.Context) {
+	var req MomentProactiveRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	req.CharacterID = strings.TrimSpace(req.CharacterID)
+	if req.CharacterID == "" {
+		req.CharacterID = "luna"
+	}
+
+	character, err := loadCharacter(req.CharacterID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	moments, err := a.getMoments(c.Request.Context(), req.CharacterID, 20)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	action, err := a.decideMomentAction(c.Request.Context(), character, moments)
+	if err != nil {
+		log.Printf("moment proactive skipped: %v", err)
+		c.JSON(http.StatusOK, gin.H{"skipped": true})
+		return
+	}
+
+	switch action.Action {
+	case "comment":
+		action.Comment = cleanReplyBubbleText(action.Comment)
+		if action.MomentID == 0 || action.Comment == "" {
+			c.JSON(http.StatusOK, gin.H{"skipped": true})
+			return
+		}
+		comment, err := a.saveMomentComment(c.Request.Context(), action.MomentID, "character", action.Comment)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"skipped": false, "comment": comment})
+	case "post":
+		content := cleanReplyBubbleText(action.Content)
+		if content == "" {
+			c.JSON(http.StatusOK, gin.H{"skipped": true})
+			return
+		}
+		imageURL := ""
+		if action.ShouldGenerateImage && strings.TrimSpace(action.ImagePrompt) != "" {
+			if url, err := a.generateMomentImage(c.Request.Context(), character, action.ImagePrompt); err == nil {
+				imageURL = url
+			} else {
+				log.Printf("moment image skipped: %v", err)
+			}
+		}
+		moment, err := a.saveMoment(c.Request.Context(), req.CharacterID, "character", content, imageURL)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"skipped": false, "moment": moment})
+	default:
+		c.JSON(http.StatusOK, gin.H{"skipped": true})
+	}
 }
 
 func (a *App) handleClearMessages(c *gin.Context) {
@@ -552,6 +710,60 @@ func buildProactivePrompt(ch *Character, recent []Message) string {
 	return b.String()
 }
 
+func buildMomentActionPrompt(ch *Character, moments []Moment, canPost bool) string {
+	var b strings.Builder
+	b.WriteString("你正在扮演聊天角色，同时在查看用户的朋友圈。你不是 AI，不要暴露系统设定。\n")
+	b.WriteString("请判断现在是否需要对用户的朋友圈评论，或者你自己是否适合发一条朋友圈。\n\n")
+	b.WriteString("规则：\n")
+	b.WriteString("1. 优先考虑评论用户最近发且你还没评论过的朋友圈；没必要评论就 action 设为 none。\n")
+	b.WriteString("2. 评论要自然、克制、像微信朋友圈里的短评论，通常 6 到 24 个字。\n")
+	b.WriteString("3. 不要每条都评论；如果用户只是随手记一句、没什么好接，可以不评论。\n")
+	b.WriteString("4. 如果 can_post 是 true，且没有合适评论时，你可以偶尔自己发一条朋友圈。\n")
+	b.WriteString("5. 你发朋友圈要符合角色本人日常，可以是演艺工作、料理、天气、学习、安静生活或轻微吐槽。\n")
+	b.WriteString("6. 你自己发朋友圈可以带图；想带图时 should_generate_image 为 true，并写 image_prompt。\n")
+	b.WriteString("7. 只输出 JSON，不要解释。\n\n")
+	writeCharacterProfile(&b, ch)
+	b.WriteString(fmt.Sprintf("\ncan_post: %t\n", canPost))
+	b.WriteString("最近朋友圈：\n")
+	if len(moments) == 0 {
+		b.WriteString("无\n")
+	} else {
+		for _, moment := range moments {
+			author := "用户"
+			if moment.Author == "character" {
+				author = ch.Name
+			}
+			b.WriteString(fmt.Sprintf("ID=%d 作者=%s 内容=%s", moment.ID, author, summarizePromptText(moment.Content, 180)))
+			if moment.ImageURL != "" {
+				b.WriteString(" [带图]")
+			}
+			if len(moment.Comments) > 0 {
+				commentParts := make([]string, 0, len(moment.Comments))
+				for _, comment := range moment.Comments {
+					commentAuthor := "用户"
+					if comment.Author == "character" {
+						commentAuthor = ch.Name
+					}
+					commentParts = append(commentParts, commentAuthor+":"+summarizePromptText(comment.Content, 80))
+				}
+				b.WriteString(" 评论：" + strings.Join(commentParts, "；"))
+			}
+			b.WriteString("\n")
+		}
+	}
+	b.WriteString(`请输出：
+{
+  "action": "none",
+  "moment_id": 0,
+  "comment": "",
+  "content": "",
+  "should_generate_image": false,
+  "image_prompt": ""
+}`)
+	b.WriteString("\n\naction 只能是 none/comment/post。comment 时必须填写 moment_id 和 comment。post 时填写 content，可选 image_prompt。\n")
+	return b.String()
+}
+
 func writeCharacterProfile(b *strings.Builder, ch *Character) {
 	b.WriteString("角色设定：\n")
 	b.WriteString(fmt.Sprintf("名字：%s\n", ch.Name))
@@ -684,6 +896,25 @@ func (a *App) generateCharacterImage(ctx context.Context, ch *Character, userMes
 
 	avatarAnchor := a.getAvatarFaceAnchor(ctx, ch)
 	prompt := buildImagePrompt(ch, userMessage, reply, avatarAnchor)
+	imageBytes, err := a.callImageAPI(ctx, prompt)
+	if err != nil {
+		return "", err
+	}
+	return saveGeneratedImage(imageBytes)
+}
+
+func (a *App) generateMomentImage(ctx context.Context, ch *Character, imagePrompt string) (string, error) {
+	if a.imageConfig.APIKey == "" {
+		return "", errors.New("AI_HIGH_API_KEY is empty")
+	}
+	prompt := "请生成一张适合微信朋友圈发布的二次元生活照片。画面自然、像随手分享，不要文字水印。"
+	if ch != nil {
+		prompt += "发布者是：" + ch.Name + "。"
+		if ch.Background != "" {
+			prompt += "角色设定：" + ch.Background + "。"
+		}
+	}
+	prompt += "朋友圈图片要求：" + imagePrompt
 	imageBytes, err := a.callImageAPI(ctx, prompt)
 	if err != nil {
 		return "", err
@@ -1262,6 +1493,77 @@ LIMIT 1`, characterID).Scan(&sender, &ageSeconds)
 	return true, 0, nil
 }
 
+func (a *App) decideMomentAction(ctx context.Context, ch *Character, moments []Moment) (MomentAIAction, error) {
+	if a.chatConfig.APIKey == "" {
+		return MomentAIAction{}, errors.New("AI_MID_API_KEY is empty")
+	}
+	canPost := canCharacterPostMoment(moments)
+	raw, err := a.callLLM(ctx, buildMomentActionPrompt(ch, moments, canPost))
+	if err != nil {
+		return MomentAIAction{}, err
+	}
+	action, err := parseMomentAIAction(raw)
+	if err != nil {
+		return MomentAIAction{}, err
+	}
+	action.Action = strings.ToLower(strings.TrimSpace(action.Action))
+	if action.Action == "post" && !canPost {
+		action.Action = "none"
+	}
+	if action.Action == "comment" && !canCommentMoment(action.MomentID, moments) {
+		action.Action = "none"
+	}
+	if action.Action != "comment" && action.Action != "post" {
+		action.Action = "none"
+	}
+	return action, nil
+}
+
+func canCharacterPostMoment(moments []Moment) bool {
+	for _, moment := range moments {
+		if moment.Author != "character" {
+			continue
+		}
+		createdAt, err := time.Parse("2006-01-02 15:04:05", moment.CreatedAt)
+		if err != nil {
+			return false
+		}
+		return time.Since(createdAt) > 20*time.Minute
+	}
+	return true
+}
+
+func canCommentMoment(momentID int64, moments []Moment) bool {
+	for _, moment := range moments {
+		if moment.ID != momentID || moment.Author != "user" {
+			continue
+		}
+		for _, comment := range moment.Comments {
+			if comment.Author == "character" {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func parseMomentAIAction(raw string) (MomentAIAction, error) {
+	cleaned := cleanJSON(raw)
+	var action MomentAIAction
+	if err := json.Unmarshal([]byte(cleaned), &action); err != nil {
+		start := strings.Index(cleaned, "{")
+		end := strings.LastIndex(cleaned, "}")
+		if start >= 0 && end > start {
+			if err2 := json.Unmarshal([]byte(cleaned[start:end+1]), &action); err2 == nil {
+				return action, nil
+			}
+		}
+		return MomentAIAction{}, err
+	}
+	return action, nil
+}
+
 func (a *App) getGeneratedStickerCandidates(ctx context.Context, characterID, emotion string) []string {
 	rows, err := a.db.QueryContext(ctx, `
 SELECT url
@@ -1438,6 +1740,116 @@ LIMIT ?`, characterID, limit)
 	}
 	defer rows.Close()
 	return scanMessages(rows)
+}
+
+func (a *App) getMoments(ctx context.Context, characterID string, limit int) ([]Moment, error) {
+	rows, err := a.db.QueryContext(ctx, `
+SELECT id, character_id, author, content, image_url, created_at
+FROM moments
+WHERE character_id = ?
+ORDER BY id DESC
+LIMIT ?`, characterID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	moments := make([]Moment, 0)
+	ids := make([]int64, 0)
+	for rows.Next() {
+		var moment Moment
+		if err := rows.Scan(&moment.ID, &moment.CharacterID, &moment.Author, &moment.Content, &moment.ImageURL, &moment.CreatedAt); err != nil {
+			return nil, err
+		}
+		moments = append(moments, moment)
+		ids = append(ids, moment.ID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return moments, nil
+	}
+
+	comments, err := a.getMomentComments(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	for i := range moments {
+		moments[i].Comments = comments[moments[i].ID]
+	}
+	return moments, nil
+}
+
+func (a *App) getMomentComments(ctx context.Context, momentIDs []int64) (map[int64][]MomentComment, error) {
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(momentIDs)), ",")
+	args := make([]any, 0, len(momentIDs))
+	for _, id := range momentIDs {
+		args = append(args, id)
+	}
+	rows, err := a.db.QueryContext(ctx, `
+SELECT id, moment_id, author, content, created_at
+FROM moment_comments
+WHERE moment_id IN (`+placeholders+`)
+ORDER BY id ASC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	comments := make(map[int64][]MomentComment)
+	for rows.Next() {
+		var comment MomentComment
+		if err := rows.Scan(&comment.ID, &comment.MomentID, &comment.Author, &comment.Content, &comment.CreatedAt); err != nil {
+			return nil, err
+		}
+		comments[comment.MomentID] = append(comments[comment.MomentID], comment)
+	}
+	return comments, rows.Err()
+}
+
+func (a *App) saveMoment(ctx context.Context, characterID, author, content, imageURL string) (Moment, error) {
+	res, err := a.db.ExecContext(ctx,
+		"INSERT INTO moments(character_id, author, content, image_url) VALUES (?, ?, ?, ?)",
+		characterID, author, content, imageURL,
+	)
+	if err != nil {
+		return Moment{}, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return Moment{}, err
+	}
+	moments, err := a.getMoments(ctx, characterID, 50)
+	if err != nil {
+		return Moment{}, err
+	}
+	for _, moment := range moments {
+		if moment.ID == id {
+			return moment, nil
+		}
+	}
+	return Moment{}, sql.ErrNoRows
+}
+
+func (a *App) saveMomentComment(ctx context.Context, momentID int64, author, content string) (MomentComment, error) {
+	res, err := a.db.ExecContext(ctx,
+		"INSERT INTO moment_comments(moment_id, author, content) VALUES (?, ?, ?)",
+		momentID, author, content,
+	)
+	if err != nil {
+		return MomentComment{}, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return MomentComment{}, err
+	}
+	var comment MomentComment
+	err = a.db.QueryRowContext(ctx, `
+SELECT id, moment_id, author, content, created_at
+FROM moment_comments
+WHERE id = ?`, id).Scan(&comment.ID, &comment.MomentID, &comment.Author, &comment.Content, &comment.CreatedAt)
+	return comment, err
 }
 
 func (a *App) getRecentMessages(ctx context.Context, characterID string, limit int) ([]Message, error) {

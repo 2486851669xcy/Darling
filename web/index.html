@@ -71,33 +71,11 @@
               <img class="moment-avatar moments-self-avatar" alt="我的头像" />
             </div>
           </section>
-          <article class="moment-card">
-            <img class="moment-avatar" alt="樱岛麻衣头像" />
-            <div class="moment-body">
-              <div class="moment-name">樱岛麻衣</div>
-              <p>拍摄结束。回去之前买点食材，今晚大概会做得清淡一点</p>
-              <div class="moment-photo-grid">
-                <div></div>
-                <div></div>
-                <div></div>
-              </div>
-              <div class="moment-actions">
-                <span>刚刚</span>
-                <button type="button">··</button>
-              </div>
-            </div>
-          </article>
-          <article class="moment-card">
-            <img class="moment-avatar" alt="樱岛麻衣头像" />
-            <div class="moment-body">
-              <div class="moment-name">樱岛麻衣</div>
-              <p>天气不错。偶尔安静一点，也不坏</p>
-              <div class="moment-actions">
-                <span>昨天 21:14</span>
-                <button type="button">··</button>
-              </div>
-            </div>
-          </article>
+          <section class="moment-composer">
+            <textarea id="momentInput" maxlength="280" placeholder="这一刻的想法..."></textarea>
+            <button id="postMomentBtn" type="button">发表</button>
+          </section>
+          <section id="momentsList" class="moments-list"></section>
         </main>
 
         <main id="profileView" class="app-view profile-view">

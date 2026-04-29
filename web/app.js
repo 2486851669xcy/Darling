@@ -16,6 +16,9 @@ const maiConversation = document.getElementById('maiConversation');
 const maiContact = document.getElementById('maiContact');
 const conversationPreview = document.getElementById('conversationPreview');
 const conversationTime = document.getElementById('conversationTime');
+const momentInput = document.getElementById('momentInput');
+const postMomentBtn = document.getElementById('postMomentBtn');
+const momentsList = document.getElementById('momentsList');
 
 const state = {
   character: {
@@ -29,8 +32,11 @@ const state = {
   audioReady: null,
   isLoading: false,
   proactiveTimer: null,
+  momentTimer: null,
   proactiveBusy: false,
+  momentBusy: false,
   lastVisibleMessageTime: null,
+  moments: [],
 };
 
 const proactiveDelayRange = {
@@ -41,6 +47,11 @@ const proactiveDelayRange = {
 const firstProactiveDelayRange = {
   min: 8 * 1000,
   max: 15 * 1000,
+};
+
+const momentCheckDelayRange = {
+  min: 90 * 1000,
+  max: 240 * 1000,
 };
 
 function getAudioContext() {
@@ -145,6 +156,42 @@ async function requestProactiveMessage() {
   return response.json();
 }
 
+async function fetchMoments() {
+  const response = await fetch(`/api/moments?character_id=${characterId}`);
+  if (!response.ok) {
+    throw new Error('加载朋友圈失败');
+  }
+  return response.json();
+}
+
+async function createMoment(content) {
+  const response = await fetch('/api/moments', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ character_id: characterId, content }),
+  });
+
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || '发表失败');
+  }
+  return response.json();
+}
+
+async function requestMomentProactive() {
+  const response = await fetch('/api/moments/proactive', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ character_id: characterId }),
+  });
+
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || '朋友圈检查失败');
+  }
+  return response.json();
+}
+
 async function clearMessages() {
   const response = await fetch(`/api/messages/clear?character_id=${characterId}`, {
     method: 'POST',
@@ -230,9 +277,112 @@ function formatListTime(value) {
   return `${date.getMonth() + 1}/${date.getDate()}`;
 }
 
+function formatMomentTime(value) {
+  const date = parseMessageDate(value);
+  if (!date) return '';
+
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  if (diffMs < 60 * 1000) return '刚刚';
+  if (diffMs < 60 * 60 * 1000) return `${Math.floor(diffMs / 60000)}分钟前`;
+  if (date.toDateString() === now.toDateString()) return `今天 ${formatMessageTime(value)}`;
+  return `${date.getMonth() + 1}月${date.getDate()}日 ${formatMessageTime(value)}`;
+}
+
 function parseMessageDate(value) {
   const date = value ? new Date(value.replace(' ', 'T')) : new Date();
   return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function getMomentAuthorName(author) {
+  return author === 'character' ? state.character.name : '我';
+}
+
+function getMomentAvatar(author) {
+  if (author === 'character') {
+    return state.character.avatar || 'https://placehold.co/64x64?text=AI';
+  }
+  return state.character.user_avatar || 'https://placehold.co/64x64?text=U';
+}
+
+function createMomentCard(moment) {
+  const card = document.createElement('article');
+  card.className = 'moment-card';
+
+  const avatar = document.createElement('img');
+  avatar.className = 'moment-avatar';
+  avatar.src = getMomentAvatar(moment.author);
+  avatar.alt = `${getMomentAuthorName(moment.author)}头像`;
+
+  const body = document.createElement('div');
+  body.className = 'moment-body';
+
+  const name = document.createElement('div');
+  name.className = 'moment-name';
+  name.textContent = getMomentAuthorName(moment.author);
+
+  const content = document.createElement('p');
+  content.textContent = moment.content;
+
+  body.appendChild(name);
+  body.appendChild(content);
+
+  if (moment.image_url) {
+    const image = document.createElement('img');
+    image.className = 'moment-image';
+    image.src = moment.image_url;
+    image.alt = '朋友圈图片';
+    body.appendChild(image);
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'moment-actions';
+  const time = document.createElement('span');
+  time.textContent = formatMomentTime(moment.created_at);
+  const menu = document.createElement('button');
+  menu.type = 'button';
+  menu.textContent = '··';
+  actions.appendChild(time);
+  actions.appendChild(menu);
+  body.appendChild(actions);
+
+  if (Array.isArray(moment.comments) && moment.comments.length > 0) {
+    const comments = document.createElement('div');
+    comments.className = 'moment-comments';
+    moment.comments.forEach((comment) => {
+      const item = document.createElement('div');
+      const author = document.createElement('strong');
+      author.textContent = getMomentAuthorName(comment.author);
+      item.appendChild(author);
+      item.append(`：${comment.content}`);
+      comments.appendChild(item);
+    });
+    body.appendChild(comments);
+  }
+
+  card.appendChild(avatar);
+  card.appendChild(body);
+  return card;
+}
+
+function renderMoments(moments) {
+  state.moments = Array.isArray(moments) ? moments : [];
+  momentsList.innerHTML = '';
+  if (state.moments.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.textContent = '还没有朋友圈，发第一条试试吧。';
+    momentsList.appendChild(empty);
+    return;
+  }
+  state.moments.forEach((moment) => {
+    momentsList.appendChild(createMomentCard(moment));
+  });
+}
+
+async function refreshMoments() {
+  const moments = await fetchMoments();
+  renderMoments(moments);
 }
 
 function updateConversationSummary(messages = state.messages) {
@@ -396,6 +546,13 @@ function scheduleProactiveMessage(delayMs) {
   state.proactiveTimer = window.setTimeout(checkProactiveMessage, delay);
 }
 
+function scheduleMomentCheck(delayMs) {
+  window.clearTimeout(state.momentTimer);
+  const delay = Number.isFinite(delayMs) ? delayMs : randomDelay(momentCheckDelayRange);
+  console.info(`朋友圈 AI 检查已安排，约 ${Math.round(delay / 1000)} 秒后执行`);
+  state.momentTimer = window.setTimeout(checkMomentProactive, delay);
+}
+
 async function checkProactiveMessage() {
   const typedText = messageInput.value.trim();
   if (document.hidden || state.isLoading || state.proactiveBusy || typedText) {
@@ -444,6 +601,39 @@ async function checkProactiveMessage() {
       typingIndicator.classList.add('hidden');
     }
     scheduleProactiveMessage();
+  }
+}
+
+async function checkMomentProactive() {
+  if (document.hidden || state.momentBusy) {
+    console.info('朋友圈 AI 检查跳过', {
+      hidden: document.hidden,
+      busy: state.momentBusy,
+    });
+    scheduleMomentCheck();
+    return;
+  }
+
+  console.info('朋友圈 AI 检查开始');
+  state.momentBusy = true;
+  try {
+    const result = await requestMomentProactive();
+    if (!result.skipped) {
+      if (result.comment) {
+        console.info('朋友圈 AI 已评论', result.comment);
+      }
+      if (result.moment) {
+        console.info('朋友圈 AI 已发动态', result.moment);
+      }
+      await refreshMoments();
+    } else {
+      console.info('朋友圈 AI 暂不评论也不发动态', result);
+    }
+  } catch (error) {
+    console.warn('朋友圈 AI 检查失败', error);
+  } finally {
+    state.momentBusy = false;
+    scheduleMomentCheck();
   }
 }
 
@@ -498,7 +688,27 @@ maiContact.addEventListener('click', openChat);
 tabButtons.forEach((button) => {
   button.addEventListener('click', () => {
     setMainView(button.dataset.view);
+    if (button.dataset.view === 'moments') {
+      refreshMoments().catch((error) => console.warn(error));
+    }
   });
+});
+
+postMomentBtn.addEventListener('click', async () => {
+  const content = momentInput.value.trim();
+  if (!content) return;
+
+  postMomentBtn.disabled = true;
+  try {
+    await createMoment(content);
+    momentInput.value = '';
+    await refreshMoments();
+    scheduleMomentCheck(20 * 1000);
+  } catch (error) {
+    alert(error.message);
+  } finally {
+    postMomentBtn.disabled = false;
+  }
 });
 
 clearBtn.addEventListener('click', async () => {
@@ -542,12 +752,14 @@ function applyCharacterUI(character) {
 
 (async function init() {
   try {
-    const [character, messages] = await Promise.all([fetchCharacter(), fetchMessages()]);
+    const [character, messages, moments] = await Promise.all([fetchCharacter(), fetchMessages(), fetchMoments()]);
     applyCharacterUI(character);
     state.messages = messages;
+    renderMoments(moments);
     updateConversationSummary();
     setMainView('messages');
     scheduleProactiveMessage(randomDelay(firstProactiveDelayRange));
+    scheduleMomentCheck(randomDelay(momentCheckDelayRange));
   } catch (error) {
     setMainView('messages');
     conversationPreview.textContent = `初始化失败：${error.message}`;
