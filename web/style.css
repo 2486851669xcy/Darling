@@ -516,6 +516,16 @@ body {
   line-height: 1.5;
 }
 
+.moment-likes {
+  color: #576b95;
+}
+
+.moment-likes + div {
+  border-top: 1px solid #e5e7eb;
+  margin-top: 5px;
+  padding-top: 5px;
+}
+
 .moment-comments strong {
   color: #576b95;
 }

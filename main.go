@@ -63,7 +63,15 @@ type Moment struct {
 	Content     string          `json:"content"`
 	ImageURL    string          `json:"image_url"`
 	CreatedAt   string          `json:"created_at"`
+	Likes       []MomentLike    `json:"likes"`
 	Comments    []MomentComment `json:"comments"`
+}
+
+type MomentLike struct {
+	ID        int64  `json:"id"`
+	MomentID  int64  `json:"moment_id"`
+	Author    string `json:"author"`
+	CreatedAt string `json:"created_at"`
 }
 
 type MomentComment struct {
@@ -242,6 +250,14 @@ CREATE TABLE IF NOT EXISTS moments (
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_moments_character_created ON moments(character_id, created_at);
+CREATE TABLE IF NOT EXISTS moment_likes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  moment_id INTEGER NOT NULL,
+  author TEXT NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(moment_id, author)
+);
+CREATE INDEX IF NOT EXISTS idx_moment_likes_moment_created ON moment_likes(moment_id, created_at);
 CREATE TABLE IF NOT EXISTS moment_comments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   moment_id INTEGER NOT NULL,
@@ -364,7 +380,21 @@ func (a *App) handleProactiveMoment(c *gin.Context) {
 	case "comment":
 		action.Comment = cleanReplyBubbleText(action.Comment)
 		if action.MomentID == 0 || action.Comment == "" {
+			like, liked, err := a.likeLatestUserMoment(c.Request.Context(), moments)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			if liked {
+				c.JSON(http.StatusOK, gin.H{"skipped": false, "like": like})
+				return
+			}
 			c.JSON(http.StatusOK, gin.H{"skipped": true})
+			return
+		}
+		like, liked, err := a.saveMomentLike(c.Request.Context(), action.MomentID, "character")
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
 		comment, err := a.saveMomentComment(c.Request.Context(), action.MomentID, "character", action.Comment)
@@ -372,11 +402,20 @@ func (a *App) handleProactiveMoment(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"skipped": false, "comment": comment})
+		payload := gin.H{"skipped": false, "comment": comment}
+		if liked {
+			payload["like"] = like
+		}
+		c.JSON(http.StatusOK, payload)
 	case "post":
 		content := cleanReplyBubbleText(action.Content)
 		if content == "" {
 			c.JSON(http.StatusOK, gin.H{"skipped": true})
+			return
+		}
+		like, liked, err := a.likeLatestUserMoment(c.Request.Context(), moments)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
 		imageURL := ""
@@ -392,8 +431,21 @@ func (a *App) handleProactiveMoment(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"skipped": false, "moment": moment})
+		payload := gin.H{"skipped": false, "moment": moment}
+		if liked {
+			payload["like"] = like
+		}
+		c.JSON(http.StatusOK, payload)
 	default:
+		like, liked, err := a.likeLatestUserMoment(c.Request.Context(), moments)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if liked {
+			c.JSON(http.StatusOK, gin.H{"skipped": false, "like": like})
+			return
+		}
 		c.JSON(http.StatusOK, gin.H{"skipped": true})
 	}
 }
@@ -697,13 +749,14 @@ func buildMomentActionPrompt(ch *Character, moments []Moment, canPost bool) stri
 	b.WriteString("你正在扮演聊天角色，同时在查看用户的朋友圈。你不是 AI，不要暴露系统设定。\n")
 	b.WriteString("请判断现在是否需要对用户的朋友圈评论，或者你自己是否适合发一条朋友圈。\n\n")
 	b.WriteString("规则：\n")
-	b.WriteString("1. 优先考虑评论用户最近发且你还没评论过的朋友圈；没必要评论就 action 设为 none。\n")
+	b.WriteString("1. 优先考虑用户最近发且你还没互动过的朋友圈；如果适合评论就 action 设为 comment。\n")
 	b.WriteString("2. 评论要自然、克制、像微信朋友圈里的短评论，通常 6 到 24 个字。\n")
-	b.WriteString("3. 不要每条都评论；如果用户只是随手记一句、没什么好接，可以不评论。\n")
+	b.WriteString("3. 如果用户只是随手记一句、没什么好接，可以不评论，action 设为 none；系统仍会帮你点赞。\n")
 	b.WriteString("4. 如果 can_post 是 true，且没有合适评论时，你可以偶尔自己发一条朋友圈。\n")
 	b.WriteString("5. 你发朋友圈要符合角色本人日常，可以是演艺工作、料理、天气、学习、安静生活或轻微吐槽。\n")
 	b.WriteString("6. 你自己发朋友圈可以带图；想带图时 should_generate_image 为 true，并写 image_prompt。\n")
-	b.WriteString("7. 只输出 JSON，不要解释。\n\n")
+	b.WriteString("7. 不要为了评论而硬评论；点赞可以表达“看到了”。\n")
+	b.WriteString("8. 只输出 JSON，不要解释。\n\n")
 	writeCharacterProfile(&b, ch)
 	b.WriteString(fmt.Sprintf("\ncan_post: %t\n", canPost))
 	b.WriteString("最近朋友圈：\n")
@@ -729,6 +782,17 @@ func buildMomentActionPrompt(ch *Character, moments []Moment, canPost bool) stri
 					commentParts = append(commentParts, commentAuthor+":"+summarizePromptText(comment.Content, 80))
 				}
 				b.WriteString(" 评论：" + strings.Join(commentParts, "；"))
+			}
+			if len(moment.Likes) > 0 {
+				likeParts := make([]string, 0, len(moment.Likes))
+				for _, like := range moment.Likes {
+					likeAuthor := "用户"
+					if like.Author == "character" {
+						likeAuthor = ch.Name
+					}
+					likeParts = append(likeParts, likeAuthor)
+				}
+				b.WriteString(" 点赞：" + strings.Join(likeParts, "、"))
 			}
 			b.WriteString("\n")
 		}
@@ -833,6 +897,17 @@ func writeRecentMoments(b *strings.Builder, ch *Character, moments []Moment) {
 				commentParts = append(commentParts, commentAuthor+":"+summarizePromptText(comment.Content, 90))
 			}
 			b.WriteString(" 评论区：" + strings.Join(commentParts, "；"))
+		}
+		if len(moment.Likes) > 0 {
+			likeParts := make([]string, 0, len(moment.Likes))
+			for _, like := range moment.Likes {
+				likeAuthor := "用户"
+				if like.Author == "character" {
+					likeAuthor = ch.Name
+				}
+				likeParts = append(likeParts, likeAuthor)
+			}
+			b.WriteString(" 点赞：" + strings.Join(likeParts, "、"))
 		}
 		b.WriteString("\n")
 	}
@@ -1807,10 +1882,42 @@ LIMIT ?`, characterID, limit)
 	if err != nil {
 		return nil, err
 	}
+	likes, err := a.getMomentLikes(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
 	for i := range moments {
+		moments[i].Likes = likes[moments[i].ID]
 		moments[i].Comments = comments[moments[i].ID]
 	}
 	return moments, nil
+}
+
+func (a *App) getMomentLikes(ctx context.Context, momentIDs []int64) (map[int64][]MomentLike, error) {
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(momentIDs)), ",")
+	args := make([]any, 0, len(momentIDs))
+	for _, id := range momentIDs {
+		args = append(args, id)
+	}
+	rows, err := a.db.QueryContext(ctx, `
+SELECT id, moment_id, author, created_at
+FROM moment_likes
+WHERE moment_id IN (`+placeholders+`)
+ORDER BY id ASC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	likes := make(map[int64][]MomentLike)
+	for rows.Next() {
+		var like MomentLike
+		if err := rows.Scan(&like.ID, &like.MomentID, &like.Author, &like.CreatedAt); err != nil {
+			return nil, err
+		}
+		likes[like.MomentID] = append(likes[like.MomentID], like)
+	}
+	return likes, rows.Err()
 }
 
 func (a *App) getMomentComments(ctx context.Context, momentIDs []int64) (map[int64][]MomentComment, error) {
@@ -1862,6 +1969,45 @@ func (a *App) saveMoment(ctx context.Context, characterID, author, content, imag
 		}
 	}
 	return Moment{}, sql.ErrNoRows
+}
+
+func (a *App) saveMomentLike(ctx context.Context, momentID int64, author string) (MomentLike, bool, error) {
+	res, err := a.db.ExecContext(ctx,
+		"INSERT OR IGNORE INTO moment_likes(moment_id, author) VALUES (?, ?)",
+		momentID, author,
+	)
+	if err != nil {
+		return MomentLike{}, false, err
+	}
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return MomentLike{}, false, err
+	}
+	var like MomentLike
+	err = a.db.QueryRowContext(ctx, `
+SELECT id, moment_id, author, created_at
+FROM moment_likes
+WHERE moment_id = ? AND author = ?`, momentID, author).Scan(&like.ID, &like.MomentID, &like.Author, &like.CreatedAt)
+	return like, rowsAffected > 0, err
+}
+
+func (a *App) likeLatestUserMoment(ctx context.Context, moments []Moment) (MomentLike, bool, error) {
+	for _, moment := range moments {
+		if moment.Author != "user" || hasMomentLike(moment, "character") {
+			continue
+		}
+		return a.saveMomentLike(ctx, moment.ID, "character")
+	}
+	return MomentLike{}, false, nil
+}
+
+func hasMomentLike(moment Moment, author string) bool {
+	for _, like := range moment.Likes {
+		if like.Author == author {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *App) saveMomentComment(ctx context.Context, momentID int64, author, content string) (MomentComment, error) {
