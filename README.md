@@ -8,17 +8,17 @@
 
 ---
 
-## 截图怎么放
+## 界面预览
 
 截图只放用户能看到的界面，不需要上传配置文件截图。
 
-目录：
+图片放在：
 
 ```text
 docs/screenshots/
 ```
 
-推荐命名：
+当前 README 会展示这些截图：
 
 ```text
 docs/screenshots/messages-home.png
@@ -30,29 +30,33 @@ docs/screenshots/notification-toast.png
 docs/screenshots/ai-moment.png
 ```
 
-这些图分别是什么：
+### 消息主页
 
-- `messages-home.png`：消息主页，也就是能看到“麻衣”会话列表的那一页。
-- `chat-detail.png`：点进麻衣后的聊天页，展示气泡、头像、时间等。
-- `moments-home.png`：朋友圈主页，展示用户发的朋友圈和 AI 评论。
-- `contacts-home.png`：联系人页，展示联系人列表里的麻衣。
-- `profile-home.png`：我的页，类似微信“我”的页面。
-- `notification-toast.png`：AI 发消息或朋友圈更新时，顶部弹出的提醒和红点。
-- `ai-moment.png`：AI 自己发朋友圈，或者 AI 评论你朋友圈的截图。
+![消息主页](docs/screenshots/messages-home.png)
 
-如果只想先放几张，优先放这三张：
+### 聊天详情
 
-```text
-docs/screenshots/messages-home.png
-docs/screenshots/chat-detail.png
-docs/screenshots/moments-home.png
-```
+![聊天详情](docs/screenshots/chat-detail.png)
 
-当前仓库里还有两张旧截图，后面可以用新版截图替换：
+### 朋友圈
 
-![聊天主界面](docs/screenshots/chat-main.png)
+![朋友圈](docs/screenshots/moments-home.png)
 
-![人设回复示例](docs/screenshots/chat-persona.png)
+### 联系人
+
+![联系人](docs/screenshots/contacts-home.png)
+
+### 我的
+
+![我的](docs/screenshots/profile-home.png)
+
+### 顶部提醒和红点
+
+![顶部提醒和红点](docs/screenshots/notification-toast.png)
+
+### AI 朋友圈互动
+
+![AI 朋友圈互动](docs/screenshots/ai-moment.png)
 
 ---
 
