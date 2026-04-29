@@ -21,7 +21,7 @@ Darling 是一个本地可运行的二次元陪伴聊天 Demo：你可以和角�
 - 你可以发文字朋友圈。
 - 她会看你的朋友圈，点赞、评论，或者自己发朋友圈。
 - 如果 AI 更新发生在你没打开的页面，会有顶部弹窗和红点提醒。
-- 表情包支持从角色配置读取，也支持自动抓取麻衣相关表情包写进 SQLite。
+- 表情包会自动抓取麻衣相关表情包并写进 SQLite，也可以用角色配置补充自定义表情。
 - 控制台会打印 token usage，方便你知道钱花在哪。
 
 ---
@@ -114,9 +114,9 @@ data/characters/luna.yaml
 - `personality`：性格关键词。
 - `speech_style`：说话风格。
 - `rules`：角色必须遵守的规则。
-- `stickers`：不同情绪下会发的表情包。
+- `stickers`：可选，自定义补充表情包。默认麻衣表情包会自动抓取并缓存到 SQLite。
 
-表情包示例：
+如果你想给自己的角色手动补充表情包，可以这样写：
 
 ```yaml
 stickers:
@@ -129,7 +129,9 @@ stickers:
     - https://your-cdn.com/character/teasing_1.png
 ```
 
-建议使用稳定图片直链，不要用容易过期的搜索缩略图。
+默认角色会在启动后自动抓取麻衣相关表情包，缓存进 `dimension.db` 的 `sticker_assets` 表；聊天时优先从 SQLite 里挑表情包，再 fallback 到这里手动配置的 `stickers`。
+
+如果你手动补充，建议使用稳定图片直链，不要用容易过期的搜索缩略图。
 
 ---
 
@@ -150,6 +152,7 @@ Darling 不是每隔几秒就硬调 AI。
 - 改了 `main.go` 或 `.env` 后，需要重启后端。
 - 改了 `web/app.js`、`web/style.css`、`web/index.html` 后，刷新页面即可。
 - 聊天记录、朋友圈、评论、点赞、表情包缓存都存在 `dimension.db`。
+- 麻衣表情包会自动抓取并入库；如果你换成别的角色，可以在 `luna.yaml` 里补 `stickers`。
 - 主动消息和朋友圈检查不是固定时间触发，等一会儿才会出现。
 - 如果你看到 Gin 的 trusted proxies 警告，本地运行可以忽略。
 
