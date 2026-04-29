@@ -73,21 +73,31 @@ rules:
 
 stickers:
   happy:
-    - https://tse1-mm.cn.bing.net/th/id/OIP-C._0YwthFegYzIbzfkF0zj5gHaHW?w=191&h=193&c=7&r=0&o=7&dpr=1.5&pid=1.7&rm=3
-  shy:
-    - https://tse3-mm.cn.bing.net/th/id/OIP-C.mv_IVfBkYEfsyftDP95nwQHaHa?w=174&h=180&c=7&r=0&o=7&dpr=1.5&pid=1.7&rm=3
-  angry:
-    - https://tse1-mm.cn.bing.net/th/id/OIP-C.mNvy7p7iE77naeX1gatkxAHaHP?w=178&h=180&c=7&r=0&o=7&dpr=1.5&pid=1.7&rm=3
-  sad:
-    - https://tse1-mm.cn.bing.net/th/id/OIP-C.mNvy7p7iE77naeX1gatkxAHaHP?w=178&h=180&c=7&r=0&o=7&dpr=1.5&pid=1.7&rm=3
-  worried:
-    - https://tse1-mm.cn.bing.net/th/id/OIP-C.mNvy7p7iE77naeX1gatkxAHaHP?w=178&h=180&c=7&r=0&o=7&dpr=1.5&pid=1.7&rm=3
-  jealous:
-    - https://tse1-mm.cn.bing.net/th/id/OIP-C.mNvy7p7iE77naeX1gatkxAHaHP?w=178&h=180&c=7&r=0&o=7&dpr=1.5&pid=1.7&rm=3
+    - https://storage.sticker-collection.com/stickers/plain/mai_sakurajima/512/e6697aa8-b6e3-405c-8b4a-da8860a86a13file_3070438.webp
+    - https://storage.sticker-collection.com/stickers/plain/mai_sakurajima/512/9cda376a-304d-44d1-9a49-db8f9641b5c5file_3070450.webp
+    - https://storage.sticker-collection.com/stickers/plain/mai_sakurajima/512/d08fefc8-3577-4aa3-8ed9-5979c62bf0ccfile_3070437.webp
   teasing:
-    - https://tse1-mm.cn.bing.net/th/id/OIP-C.mNvy7p7iE77naeX1gatkxAHaHP?w=178&h=180&c=7&r=0&o=7&dpr=1.5&pid=1.7&rm=3
+    - https://storage.sticker-collection.com/stickers/plain/mai_sakurajima/512/ea8d4ac4-8e82-467a-b477-b20220bd4c32file_3070440.webp
+    - https://storage.sticker-collection.com/stickers/plain/mai_sakurajima/512/a3dc066a-dfab-42ba-ac92-e6e04de68cc0file_3070439.webp
+  angry:
+    - https://storage.sticker-collection.com/stickers/plain/mai_sakurajima/512/a6202621-704e-4314-9593-d3f36adbde08file_3070436.webp
+    - https://storage.sticker-collection.com/stickers/plain/mai_sakurajima/512/a13f1478-5177-44ef-aa2c-cf3ceeb0b558file_3070435.webp
+  sad:
+    - https://storage.sticker-collection.com/stickers/plain/mai_sakurajima/512/f7446bbf-b4ed-412f-b6de-3c2726aab223file_3070447.webp
+  shy:
+    - https://storage.sticker-collection.com/stickers/plain/mai_sakurajima/512/e70b21dd-e286-4cba-ab61-fb09d258fe4bfile_3070444.webp
+  worried:
+    - https://storage.sticker-collection.com/stickers/plain/mai_sakurajima/512/cecc2042-6b59-4d1e-b181-536f03630723file_3070451.webp
+    - https://storage.sticker-collection.com/stickers/plain/mai_sakurajima/512/969528da-221c-4036-861a-bf92e2ac3470file_3070453.webp
+  jealous:
+    - https://storage.sticker-collection.com/stickers/plain/mai_sakurajima/512/a3dc066a-dfab-42ba-ac92-e6e04de68cc0file_3070439.webp
+    - https://storage.sticker-collection.com/stickers/plain/mai_sakurajima/512/a6202621-704e-4314-9593-d3f36adbde08file_3070436.webp
   sleepy:
-    - https://tse1-mm.cn.bing.net/th/id/OIP-C.mNvy7p7iE77naeX1gatkxAHaHP?w=178&h=180&c=7&r=0&o=7&dpr=1.5&pid=1.7&rm=3
+    - https://storage.sticker-collection.com/stickers/plain/mai_sakurajima/512/f7446bbf-b4ed-412f-b6de-3c2726aab223file_3070447.webp
+  neutral:
+    - https://storage.sticker-collection.com/stickers/plain/mai_sakurajima/512/7ca0e232-7e8d-454e-bbbf-ba451c4235bcfile_3070455.webp
+  excited:
+    - https://storage.sticker-collection.com/stickers/plain/mai_sakurajima/512/d08fefc8-3577-4aa3-8ed9-5979c62bf0ccfile_3070437.webp
 
 metadata:
   original_name_jp: 桜島麻衣

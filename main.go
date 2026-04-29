@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -89,6 +90,13 @@ type App struct {
 	imageConfig AIConfig
 	chatClient  *http.Client
 	imageClient *http.Client
+	avatarMu    sync.RWMutex
+	avatarCache map[string]string
+}
+
+type StickerCadence struct {
+	RecentCount       int
+	MessagesSinceLast int
 }
 
 func main() {
@@ -151,6 +159,7 @@ func NewApp() (*App, error) {
 		imageClient: &http.Client{
 			Timeout: time.Duration(imageCfg.TimeoutSec) * time.Second,
 		},
+		avatarCache: make(map[string]string),
 	}, nil
 }
 
@@ -165,6 +174,17 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_messages_character_created ON messages(character_id, created_at);
+CREATE TABLE IF NOT EXISTS sticker_assets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  character_id TEXT NOT NULL,
+  emotion TEXT NOT NULL,
+  url TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'generated',
+  prompt TEXT NOT NULL DEFAULT '',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  last_used_at DATETIME
+);
+CREATE INDEX IF NOT EXISTS idx_sticker_assets_lookup ON sticker_assets(character_id, emotion, created_at);
 `)
 	return err
 }
@@ -288,8 +308,8 @@ func (a *App) handleSendChat(c *gin.Context) {
 	}
 
 	result := []Message{characterMsg}
-	if shouldSendSticker(character, parsed) {
-		if stickerURL := pickSticker(character, parsed.Emotion); stickerURL != "" {
+	if a.shouldSendSticker(c.Request.Context(), character, parsed) {
+		if stickerURL := a.pickSticker(c.Request.Context(), character, parsed.Emotion); stickerURL != "" {
 			stickerMsg, err := a.saveMessage(c.Request.Context(), req.CharacterID, "character", "sticker", stickerURL)
 			if err == nil {
 				result = append(result, stickerMsg)
@@ -369,11 +389,11 @@ func buildPrompt(ch *Character, recent []Message, userMessage string) string {
 			}
 			switch msg.Type {
 			case "sticker":
-				b.WriteString(fmt.Sprintf("%s: [发送了一张表情包: %s]\n", role, msg.Content))
+				b.WriteString(fmt.Sprintf("%s: [发送了一张表情包]\n", role))
 			case "image":
-				b.WriteString(fmt.Sprintf("%s: [发送了一张图片: %s]\n", role, msg.Content))
+				b.WriteString(fmt.Sprintf("%s: [发送了一张图片]\n", role))
 			default:
-				b.WriteString(fmt.Sprintf("%s: %s\n", role, msg.Content))
+				b.WriteString(fmt.Sprintf("%s: %s\n", role, summarizePromptText(msg.Content, 500)))
 			}
 		}
 	}
@@ -394,6 +414,21 @@ func buildPrompt(ch *Character, recent []Message, userMessage string) string {
 	return b.String()
 }
 
+func summarizePromptText(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if strings.HasPrefix(value, "data:") {
+		return "[base64 image omitted]"
+	}
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit]) + "...(truncated)"
+}
+
 func (a *App) callLLM(ctx context.Context, prompt string) (string, error) {
 	if a.chatConfig.APIKey == "" {
 		return "", errors.New("AI_MID_API_KEY is empty")
@@ -407,6 +442,14 @@ func (a *App) callLLM(ctx context.Context, prompt string) (string, error) {
 		"temperature": a.chatConfig.Temperature,
 		"max_tokens":  a.chatConfig.MaxTokens,
 	}
+	return a.callChatCompletion(ctx, body)
+}
+
+func (a *App) callChatCompletion(ctx context.Context, body map[string]any) (string, error) {
+	if a.chatConfig.APIKey == "" {
+		return "", errors.New("AI_MID_API_KEY is empty")
+	}
+
 	data, err := json.Marshal(body)
 	if err != nil {
 		return "", err
@@ -459,7 +502,8 @@ func (a *App) generateCharacterImage(ctx context.Context, ch *Character, userMes
 		return "", errors.New("AI_HIGH_API_KEY is empty")
 	}
 
-	prompt := buildImagePrompt(ch, userMessage, reply)
+	avatarAnchor := a.getAvatarFaceAnchor(ctx, ch)
+	prompt := buildImagePrompt(ch, userMessage, reply, avatarAnchor)
 	imageBytes, err := a.callImageAPI(ctx, prompt)
 	if err != nil {
 		return "", err
@@ -467,9 +511,9 @@ func (a *App) generateCharacterImage(ctx context.Context, ch *Character, userMes
 	return saveGeneratedImage(imageBytes)
 }
 
-func buildImagePrompt(ch *Character, userMessage string, reply LLMReply) string {
+func buildImagePrompt(ch *Character, userMessage string, reply LLMReply, avatarAnchor string) string {
 	var b strings.Builder
-	b.WriteString("请生成一张二次元高质量插画，作为聊天角色主动发给用户的图片。")
+	b.WriteString("请生成一张二次元高质量插画，作为聊天角色主动发给用户的照片。")
 	if ch != nil {
 		b.WriteString("角色信息：")
 		b.WriteString(ch.Name)
@@ -482,13 +526,20 @@ func buildImagePrompt(ch *Character, userMessage string, reply LLMReply) string 
 			b.WriteString(strings.Join(ch.Personality, "、"))
 		}
 	}
+	if avatarAnchor != "" {
+		b.WriteString("。这次必须把角色画成和她当前头像是同一个人。")
+		b.WriteString("头像的人脸锚点：")
+		b.WriteString(avatarAnchor)
+		b.WriteString("。脸型、五官比例、眼型、眉眼气质、发色、发型和整体神态都要尽量保持一致，不要生成另一张脸。")
+	}
 	b.WriteString("。画面要求：")
 	b.WriteString(reply.ImagePrompt)
 	if userMessage != "" {
 		b.WriteString("。当前用户刚刚说过：")
 		b.WriteString(userMessage)
 	}
-	b.WriteString("。请保持单人画面，强调自拍感或角色主动分享照片的感觉，适合聊天场景，安全自然，细节精致。")
+	b.WriteString("。请保持单人画面，强调自拍感或角色主动分享本人照片的感觉，适合聊天场景，安全自然，细节精致。")
+	b.WriteString("如果用户表达的是想看你本人，那么优先理解成同一角色的本人近照，而不是仅仅同风格的陌生二次元女生。")
 	return b.String()
 }
 
@@ -583,22 +634,190 @@ func normalizeModelName(model string) string {
 	return strings.TrimPrefix(model, "models/")
 }
 
+func (a *App) getAvatarFaceAnchor(ctx context.Context, ch *Character) string {
+	if ch == nil {
+		return ""
+	}
+
+	avatar := strings.TrimSpace(ch.Avatar)
+	if avatar == "" {
+		return ""
+	}
+
+	cacheKey := ch.ID + "|" + avatar
+	a.avatarMu.RLock()
+	cached := a.avatarCache[cacheKey]
+	a.avatarMu.RUnlock()
+	if cached != "" {
+		return cached
+	}
+
+	imageBytes, mimeType, err := a.loadImageBytes(ctx, avatar)
+	if err != nil {
+		log.Printf("load avatar failed: %v", err)
+		return ""
+	}
+
+	anchor, err := a.describeAvatarFace(ctx, ch.Name, imageBytes, mimeType)
+	if err != nil {
+		log.Printf("describe avatar failed: %v", err)
+		return ""
+	}
+
+	anchor = strings.TrimSpace(anchor)
+	if anchor == "" {
+		return ""
+	}
+
+	a.avatarMu.Lock()
+	a.avatarCache[cacheKey] = anchor
+	a.avatarMu.Unlock()
+	return anchor
+}
+
+func (a *App) loadImageBytes(ctx context.Context, source string) ([]byte, string, error) {
+	source = strings.TrimSpace(source)
+	switch {
+	case strings.HasPrefix(source, "data:"):
+		return decodeDataURL(source)
+	case strings.HasPrefix(source, "http://"), strings.HasPrefix(source, "https://"):
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, source, nil)
+		if err != nil {
+			return nil, "", err
+		}
+		resp, err := a.chatClient.Do(req)
+		if err != nil {
+			return nil, "", err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return nil, "", fmt.Errorf("fetch image http %d", resp.StatusCode)
+		}
+		data, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, "", err
+		}
+		mimeType := strings.TrimSpace(resp.Header.Get("Content-Type"))
+		if mimeType == "" {
+			mimeType = http.DetectContentType(data)
+		}
+		return data, mimeType, nil
+	case strings.HasPrefix(source, "/static/"):
+		localPath := filepath.Join("data", strings.TrimPrefix(source, "/static/"))
+		data, err := os.ReadFile(localPath)
+		if err != nil {
+			return nil, "", err
+		}
+		return data, http.DetectContentType(data), nil
+	default:
+		data, err := os.ReadFile(source)
+		if err != nil {
+			return nil, "", err
+		}
+		return data, http.DetectContentType(data), nil
+	}
+}
+
+func decodeDataURL(value string) ([]byte, string, error) {
+	comma := strings.Index(value, ",")
+	if comma < 0 {
+		return nil, "", errors.New("invalid data url")
+	}
+	meta := value[:comma]
+	payload := value[comma+1:]
+	if !strings.HasSuffix(meta, ";base64") {
+		return nil, "", errors.New("data url is not base64")
+	}
+	mimeType := strings.TrimPrefix(strings.TrimSuffix(meta, ";base64"), "data:")
+	data, err := base64.StdEncoding.DecodeString(payload)
+	if err != nil {
+		return nil, "", err
+	}
+	if mimeType == "" {
+		mimeType = http.DetectContentType(data)
+	}
+	return data, mimeType, nil
+}
+
+func (a *App) describeAvatarFace(ctx context.Context, characterName string, imageBytes []byte, mimeType string) (string, error) {
+	if len(imageBytes) == 0 {
+		return "", errors.New("empty avatar image")
+	}
+	if mimeType == "" {
+		mimeType = "image/png"
+	}
+
+	dataURL := "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(imageBytes)
+	body := map[string]any{
+		"model": a.chatConfig.Model,
+		"messages": []map[string]any{
+			{
+				"role": "user",
+				"content": []map[string]any{
+					{
+						"type": "text",
+						"text": "请根据这张角色头像，提炼一段用于后续生图的人脸一致性描述。只描述肉眼可见且稳定的人物外观锚点：脸型、五官、眼型、发型、发色、刘海、气质。用简洁中文写成一小段，不要提摄影参数，不要猜测看不见的身体细节，不要输出列表。",
+					},
+					{
+						"type": "image_url",
+						"image_url": map[string]any{
+							"url": dataURL,
+						},
+					},
+				},
+			},
+		},
+		"temperature": 0.2,
+		"max_tokens":  300,
+	}
+
+	if characterName != "" {
+		body["messages"] = []map[string]any{
+			{
+				"role": "user",
+				"content": []map[string]any{
+					{
+						"type": "text",
+						"text": "这张图是角色“" + characterName + "”的头像。请根据头像提炼一段用于后续生图的人脸一致性描述。只描述肉眼可见且稳定的人物外观锚点：脸型、五官、眼型、发型、发色、刘海、气质。用简洁中文写成一小段，不要提摄影参数，不要猜测看不见的身体细节，不要输出列表。",
+					},
+					{
+						"type": "image_url",
+						"image_url": map[string]any{
+							"url": dataURL,
+						},
+					},
+				},
+			},
+		}
+	}
+
+	raw, err := a.callChatCompletion(ctx, body)
+	if err != nil {
+		return "", err
+	}
+	return cleanJSON(raw), nil
+}
+
 func saveGeneratedImage(imageBytes []byte) (string, error) {
 	if len(imageBytes) == 0 {
 		return "", errors.New("empty image bytes")
 	}
+	return encodeImageDataURL(imageBytes), nil
+}
 
-	dir := filepath.Join("data", "generated")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
+func saveGeneratedSticker(imageBytes []byte) (string, error) {
+	if len(imageBytes) == 0 {
+		return "", errors.New("empty sticker bytes")
 	}
+	return encodeImageDataURL(imageBytes), nil
+}
 
-	filename := fmt.Sprintf("generated_%d_%04d.png", time.Now().UnixNano(), rand.Intn(10000))
-	path := filepath.Join(dir, filename)
-	if err := os.WriteFile(path, imageBytes, 0o644); err != nil {
-		return "", err
+func encodeImageDataURL(imageBytes []byte) string {
+	mimeType := http.DetectContentType(imageBytes)
+	if mimeType == "" || mimeType == "application/octet-stream" {
+		mimeType = "image/png"
 	}
-	return "/static/generated/" + filename, nil
+	return "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(imageBytes)
 }
 
 func parseLLMReply(raw string) (LLMReply, error) {
@@ -646,31 +865,52 @@ func normalizeEmotion(emotion string) string {
 	return "neutral"
 }
 
-func shouldSendSticker(character *Character, reply LLMReply) bool {
-	if character == nil || len(character.Stickers) == 0 {
+func (a *App) shouldSendSticker(ctx context.Context, character *Character, reply LLMReply) bool {
+	if character == nil {
 		return false
-	}
-	if reply.ShouldSendSticker {
-		return true
 	}
 
 	emotion := normalizeEmotion(reply.Emotion)
-	if len(getStickerCandidates(character, emotion)) == 0 {
+	a.maybeWarmStickerLibraryAsync(character, emotion)
+
+	if !a.hasStickerCandidates(ctx, character, emotion) {
+		return false
+	}
+
+	cadence := a.getStickerCadence(ctx, character.ID, 12)
+	if cadence.MessagesSinceLast >= 0 && cadence.MessagesSinceLast <= 4 {
+		return false
+	}
+	if cadence.RecentCount >= 2 {
 		return false
 	}
 
 	roll := rand.Float64()
+	if reply.ShouldSendSticker {
+		return roll < 0.35
+	}
+
+	threshold := 0.06
 	switch emotion {
 	case "happy", "shy", "worried", "jealous", "teasing", "excited":
-		return roll < 0.82
+		threshold = 0.22
 	case "sad", "angry", "sleepy":
-		return roll < 0.62
-	default:
-		return roll < 0.28
+		threshold = 0.14
 	}
+	if cadence.RecentCount > 0 {
+		threshold *= 0.45
+	}
+	return roll < threshold
 }
 
-func getStickerCandidates(character *Character, emotion string) []string {
+func (a *App) hasStickerCandidates(ctx context.Context, character *Character, emotion string) bool {
+	if len(a.getGeneratedStickerCandidates(ctx, character.ID, emotion)) > 0 {
+		return true
+	}
+	return len(getCharacterStickerCandidates(character, emotion)) > 0
+}
+
+func getCharacterStickerCandidates(character *Character, emotion string) []string {
 	if character == nil || len(character.Stickers) == 0 {
 		return nil
 	}
@@ -681,12 +921,230 @@ func getStickerCandidates(character *Character, emotion string) []string {
 	return items
 }
 
-func pickSticker(character *Character, emotion string) string {
-	items := getStickerCandidates(character, emotion)
-	if len(items) == 0 {
-		return ""
+func (a *App) pickSticker(ctx context.Context, character *Character, emotion string) string {
+	recent := a.getRecentStickerSet(ctx, character.ID, 20)
+	items := filterRecentStickers(getCharacterStickerCandidates(character, emotion), recent)
+	if len(items) > 0 {
+		return items[rand.Intn(len(items))]
 	}
-	return items[rand.Intn(len(items))]
+
+	generated := filterRecentStickers(a.getGeneratedStickerCandidates(ctx, character.ID, emotion), recent)
+	if len(generated) > 0 {
+		chosen := generated[rand.Intn(len(generated))]
+		_ = a.touchStickerAsset(ctx, character.ID, emotion, chosen)
+		return chosen
+	}
+
+	return ""
+}
+
+func filterRecentStickers(items []string, recent map[string]bool) []string {
+	if len(items) == 0 || len(recent) == 0 {
+		return items
+	}
+	filtered := make([]string, 0, len(items))
+	for _, item := range items {
+		if !recent[item] {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
+func (a *App) getStickerCadence(ctx context.Context, characterID string, limit int) StickerCadence {
+	rows, err := a.db.QueryContext(ctx, `
+SELECT message_type
+FROM messages
+WHERE character_id = ?
+ORDER BY id DESC
+LIMIT ?`, characterID, limit)
+	if err != nil {
+		log.Printf("query sticker cadence failed: %v", err)
+		return StickerCadence{MessagesSinceLast: -1}
+	}
+	defer rows.Close()
+
+	cadence := StickerCadence{MessagesSinceLast: -1}
+	index := 0
+	for rows.Next() {
+		var messageType string
+		if err := rows.Scan(&messageType); err != nil {
+			log.Printf("scan sticker cadence failed: %v", err)
+			return cadence
+		}
+		if messageType == "sticker" {
+			cadence.RecentCount++
+			if cadence.MessagesSinceLast < 0 {
+				cadence.MessagesSinceLast = index
+			}
+		}
+		index++
+	}
+	return cadence
+}
+
+func (a *App) getRecentStickerSet(ctx context.Context, characterID string, limit int) map[string]bool {
+	rows, err := a.db.QueryContext(ctx, `
+SELECT content
+FROM messages
+WHERE character_id = ? AND message_type = 'sticker'
+ORDER BY id DESC
+LIMIT ?`, characterID, limit)
+	if err != nil {
+		log.Printf("query recent stickers failed: %v", err)
+		return nil
+	}
+	defer rows.Close()
+
+	recent := make(map[string]bool)
+	for rows.Next() {
+		var content string
+		if err := rows.Scan(&content); err != nil {
+			log.Printf("scan recent sticker failed: %v", err)
+			return recent
+		}
+		recent[content] = true
+	}
+	return recent
+}
+
+func (a *App) getGeneratedStickerCandidates(ctx context.Context, characterID, emotion string) []string {
+	rows, err := a.db.QueryContext(ctx, `
+SELECT url
+FROM sticker_assets
+WHERE character_id = ? AND emotion = ?
+ORDER BY COALESCE(last_used_at, created_at) DESC, id DESC
+LIMIT 24`, characterID, emotion)
+	if err != nil {
+		log.Printf("query sticker assets failed: %v", err)
+		return nil
+	}
+	defer rows.Close()
+
+	items := make([]string, 0)
+	for rows.Next() {
+		var url string
+		if err := rows.Scan(&url); err != nil {
+			log.Printf("scan sticker asset failed: %v", err)
+			return items
+		}
+		items = append(items, url)
+	}
+	return items
+}
+
+func (a *App) countGeneratedStickerAssets(ctx context.Context, characterID, emotion string) int {
+	var count int
+	err := a.db.QueryRowContext(ctx, `
+SELECT COUNT(1)
+FROM sticker_assets
+WHERE character_id = ? AND emotion = ?`, characterID, emotion).Scan(&count)
+	if err != nil {
+		log.Printf("count sticker assets failed: %v", err)
+		return 0
+	}
+	return count
+}
+
+func (a *App) touchStickerAsset(ctx context.Context, characterID, emotion, url string) error {
+	_, err := a.db.ExecContext(ctx, `
+UPDATE sticker_assets
+SET last_used_at = CURRENT_TIMESTAMP
+WHERE character_id = ? AND emotion = ? AND url = ?`, characterID, emotion, url)
+	return err
+}
+
+func (a *App) maybeWarmStickerLibrary(ctx context.Context, character *Character, emotion string) {
+	if character == nil || strings.TrimSpace(character.ID) == "" {
+		return
+	}
+	if a.imageConfig.APIKey == "" {
+		return
+	}
+
+	count := a.countGeneratedStickerAssets(ctx, character.ID, emotion)
+	if count >= 4 {
+		return
+	}
+	if count > 0 && rand.Float64() > 0.35 {
+		return
+	}
+
+	if _, err := a.generateStickerAsset(ctx, character, emotion); err != nil {
+		log.Printf("warm sticker library failed: %v", err)
+	}
+}
+
+func (a *App) maybeWarmStickerLibraryAsync(character *Character, emotion string) {
+	if character == nil {
+		return
+	}
+
+	characterCopy := *character
+	emotion = normalizeEmotion(emotion)
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		a.maybeWarmStickerLibrary(ctx, &characterCopy, emotion)
+	}()
+}
+
+func (a *App) generateStickerAsset(ctx context.Context, character *Character, emotion string) (string, error) {
+	prompt := a.buildStickerPrompt(ctx, character, emotion)
+	imageBytes, err := a.callImageAPI(ctx, prompt)
+	if err != nil {
+		return "", err
+	}
+
+	url, err := saveGeneratedSticker(imageBytes)
+	if err != nil {
+		return "", err
+	}
+
+	if err := a.saveStickerAsset(ctx, character.ID, emotion, url, "generated", prompt); err != nil {
+		return "", err
+	}
+	return url, nil
+}
+
+func (a *App) buildStickerPrompt(ctx context.Context, character *Character, emotion string) string {
+	var b strings.Builder
+	avatarAnchor := a.getAvatarFaceAnchor(ctx, character)
+	b.WriteString("请生成一张适合聊天窗口直接发送的二次元角色反应表情包。")
+	b.WriteString("要求是单人、半身或大头贴构图、情绪清晰但不要低幼卖萌，像角色本人会发的聊天反应图。")
+	b.WriteString("画面尽量简洁，突出角色表情和动作，适合小尺寸显示，避免泛用表情包脸。")
+	if character != nil {
+		b.WriteString("角色是：")
+		b.WriteString(character.Name)
+		if character.Background != "" {
+			b.WriteString("。背景设定：")
+			b.WriteString(character.Background)
+		}
+		if len(character.Personality) > 0 {
+			b.WriteString("。性格关键词：")
+			b.WriteString(strings.Join(character.Personality, "、"))
+		}
+		if strings.Contains(character.Name, "樱岛麻衣") || strings.Contains(character.Background, "Mai Sakurajima") {
+			b.WriteString("。必须明显贴近樱岛麻衣 / Mai Sakurajima 本人：黑色长发、成熟冷静的气质，可使用峰原高中制服、演员感或兔女郎相关的原作识别元素，但不要画成陌生泛二次元女生。")
+		}
+	}
+	if avatarAnchor != "" {
+		b.WriteString("。必须和当前头像是同一个人。头像的人脸锚点：")
+		b.WriteString(avatarAnchor)
+		b.WriteString("。脸型、眼型、发型、发色和气质尽量保持一致。")
+	}
+	b.WriteString("。当前目标情绪是：")
+	b.WriteString(emotion)
+	b.WriteString("。请用这个情绪设计表情和动作，不要做成普通立绘，不要复杂背景，不要多人，不要文字水印。")
+	return b.String()
+}
+
+func (a *App) saveStickerAsset(ctx context.Context, characterID, emotion, url, source, prompt string) error {
+	_, err := a.db.ExecContext(ctx, `
+INSERT INTO sticker_assets(character_id, emotion, url, source, prompt, last_used_at)
+VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`, characterID, emotion, url, source, prompt)
+	return err
 }
 
 func (a *App) saveMessage(ctx context.Context, characterID, sender, messageType, content string) (Message, error) {
