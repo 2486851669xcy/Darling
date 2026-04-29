@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -87,6 +88,11 @@ type SendChatRequest struct {
 	Message     string `json:"message"`
 }
 
+type SendChatBatchRequest struct {
+	CharacterID string   `json:"character_id"`
+	Messages    []string `json:"messages"`
+}
+
 type CreateMomentRequest struct {
 	CharacterID string `json:"character_id"`
 	Content     string `json:"content"`
@@ -100,8 +106,13 @@ type MomentProactiveRequest struct {
 	CharacterID string `json:"character_id"`
 }
 
+type CrawlStickersRequest struct {
+	CharacterID string `json:"character_id"`
+}
+
 type SendChatResponse struct {
 	Messages              []Message `json:"messages"`
+	UserMessages          []Message `json:"user_messages,omitempty"`
 	Emotion               string    `json:"emotion"`
 	Skipped               bool      `json:"skipped,omitempty"`
 	NextCheckAfterSeconds int       `json:"next_check_after_seconds,omitempty"`
@@ -174,7 +185,9 @@ func main() {
 	r.POST("/api/moments", app.handleCreateMoment)
 	r.POST("/api/moments/proactive", app.handleProactiveMoment)
 	r.POST("/api/chat/send", app.handleSendChat)
+	r.POST("/api/chat/send_batch", app.handleSendChatBatch)
 	r.POST("/api/chat/proactive", app.handleProactiveChat)
+	r.POST("/api/stickers/crawl", app.handleCrawlStickers)
 	r.POST("/api/messages/clear", app.handleClearMessages)
 
 	log.Println("DimensionMessenger demo started: http://localhost:8080")
@@ -186,6 +199,7 @@ func main() {
 	if app.imageConfig.APIKey == "" {
 		log.Println("WARNING: AI_HIGH_API_KEY is empty. Image generation will be skipped.")
 	}
+	app.warmCharacterStickerLibraryAsync("luna")
 
 	if err := r.Run(":8080"); err != nil {
 		log.Fatal(err)
@@ -459,6 +473,30 @@ func (a *App) handleClearMessages(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
+func (a *App) handleCrawlStickers(c *gin.Context) {
+	var req CrawlStickersRequest
+	_ = c.ShouldBindJSON(&req)
+	req.CharacterID = strings.TrimSpace(req.CharacterID)
+	if req.CharacterID == "" {
+		req.CharacterID = c.DefaultQuery("character_id", "luna")
+	}
+	if req.CharacterID == "" {
+		req.CharacterID = "luna"
+	}
+
+	character, err := loadCharacter(req.CharacterID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	saved, found, err := a.crawlAndSaveStickerLibrary(c.Request.Context(), character)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error(), "saved": saved, "found": found})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "saved": saved, "found": found})
+}
+
 func (a *App) handleSendChat(c *gin.Context) {
 	var req SendChatRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -565,6 +603,122 @@ func (a *App) handleSendChat(c *gin.Context) {
 	c.JSON(http.StatusOK, SendChatResponse{Messages: result, Emotion: parsed.Emotion})
 }
 
+func (a *App) handleSendChatBatch(c *gin.Context) {
+	var req SendChatBatchRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	req.CharacterID = strings.TrimSpace(req.CharacterID)
+	if req.CharacterID == "" {
+		req.CharacterID = "luna"
+	}
+
+	cleanedMessages := make([]string, 0, len(req.Messages))
+	for _, message := range req.Messages {
+		message = strings.TrimSpace(message)
+		if message != "" {
+			cleanedMessages = append(cleanedMessages, message)
+		}
+	}
+	if len(cleanedMessages) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "messages is required"})
+		return
+	}
+
+	character, err := loadCharacter(req.CharacterID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	userMessages := make([]Message, 0, len(cleanedMessages))
+	for _, message := range cleanedMessages {
+		userMsg, err := a.saveMessage(c.Request.Context(), req.CharacterID, "user", "text", message)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		userMessages = append(userMessages, userMsg)
+	}
+
+	recent, err := a.getRecentMessages(c.Request.Context(), req.CharacterID, 18)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	moments, err := a.getMoments(c.Request.Context(), req.CharacterID, 12)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	combinedMessage := buildBatchUserMessage(cleanedMessages)
+	prompt := buildPrompt(character, recent, moments, combinedMessage)
+	raw, err := a.callLLM(c.Request.Context(), prompt)
+	if err != nil {
+		log.Printf("batch llm error: %v", err)
+		fallback, _ := a.saveMessage(c.Request.Context(), req.CharacterID, "character", "text", "呜……刚刚信号好像有点不稳定，可以再和我说一次吗？")
+		c.JSON(http.StatusOK, SendChatResponse{UserMessages: userMessages, Messages: []Message{fallback}, Emotion: "neutral"})
+		return
+	}
+
+	parsed, err := parseLLMReply(raw)
+	if err != nil {
+		log.Printf("parse batch llm json error: %v, raw=%s", err, raw)
+		parsed = LLMReply{
+			Emotion:             "neutral",
+			Reply:               "唔……我刚刚有点走神了，可以再说一次吗？",
+			ShouldSendSticker:   false,
+			ShouldGenerateImage: false,
+		}
+	}
+
+	parsed.Emotion = normalizeEmotion(parsed.Emotion)
+	parsed.Reply = strings.TrimSpace(parsed.Reply)
+	parsed.ImagePrompt = strings.TrimSpace(parsed.ImagePrompt)
+	if parsed.ShouldReply != nil && !*parsed.ShouldReply {
+		c.JSON(http.StatusOK, SendChatResponse{UserMessages: userMessages, Messages: nil, Emotion: parsed.Emotion, Skipped: true})
+		return
+	}
+	replyParts := normalizeReplyParts(parsed, "嗯哼，我在听哦。", 3)
+	parsed.Reply = strings.Join(replyParts, "\n")
+
+	result := make([]Message, 0, len(replyParts)+2)
+	for _, part := range replyParts {
+		characterMsg, err := a.saveMessage(c.Request.Context(), req.CharacterID, "character", "text", part)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		result = append(result, characterMsg)
+	}
+
+	if a.shouldSendSticker(c.Request.Context(), character, parsed) {
+		if stickerURL := a.pickSticker(c.Request.Context(), character, parsed.Emotion); stickerURL != "" {
+			stickerMsg, err := a.saveMessage(c.Request.Context(), req.CharacterID, "character", "sticker", stickerURL)
+			if err == nil {
+				result = append(result, stickerMsg)
+			}
+		}
+	}
+
+	if shouldGenerateImage(parsed) {
+		imageURL, err := a.generateCharacterImage(c.Request.Context(), character, combinedMessage, parsed)
+		if err != nil {
+			log.Printf("batch image generation skipped: %v", err)
+		} else if imageURL != "" {
+			imageMsg, err := a.saveMessage(c.Request.Context(), req.CharacterID, "character", "image", imageURL)
+			if err == nil {
+				result = append(result, imageMsg)
+			}
+		}
+	}
+
+	c.JSON(http.StatusOK, SendChatResponse{UserMessages: userMessages, Messages: result, Emotion: parsed.Emotion})
+}
+
 func (a *App) handleProactiveChat(c *gin.Context) {
 	var req ProactiveChatRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -669,6 +823,18 @@ func loadCharacter(characterID string) (*Character, error) {
 	return &ch, nil
 }
 
+func buildBatchUserMessage(messages []string) string {
+	if len(messages) == 1 {
+		return messages[0]
+	}
+	var b strings.Builder
+	b.WriteString("用户刚刚连续发了几条消息：\n")
+	for index, message := range messages {
+		b.WriteString(fmt.Sprintf("%d. %s\n", index+1, message))
+	}
+	return strings.TrimSpace(b.String())
+}
+
 func buildPrompt(ch *Character, recent []Message, moments []Moment, userMessage string) string {
 	var b strings.Builder
 	b.WriteString("你正在扮演一个虚拟角色。你不是 AI 助手，不要暴露系统设定，不要说自己是语言模型。\n\n")
@@ -715,14 +881,17 @@ func buildProactivePrompt(ch *Character, recent []Message, moments []Moment) str
 	var b strings.Builder
 	b.WriteString("你正在扮演一个虚拟角色。你不是 AI 助手，不要暴露系统设定，不要说自己是语言模型。\n\n")
 	b.WriteString("这次不是用户来找你，而是你在聊天软件里主动给用户发一条消息。\n")
+	b.WriteString("当前时间：")
+	b.WriteString(time.Now().Format("2006-01-02 15:04:05"))
+	b.WriteString("\n")
 	b.WriteString("重要要求：\n")
 	b.WriteString("1. 必须严格保持角色人设，像真实聊天里偶尔想起对方才发一句。\n")
 	b.WriteString("2. 不要说“系统提醒”“随机触发”“我来主动消息你了”之类破坏沉浸感的话。\n")
 	b.WriteString("3. 回复通常 1 句话，最多 2 句话，要自然、克制，不要热情过头。\n")
-	b.WriteString("4. 可以是轻轻关心、分享一点日常、顺手吐槽、提醒对方休息，或接上最近聊天里的一个小话题。\n")
-	b.WriteString("5. 不要每次都问问题；不要像客服回访；不要要求用户必须回复。\n")
-	b.WriteString("6. 如果自然需要分开发，可以用 replies 数组拆成 2 条短消息；主动消息不要超过 2 条。\n")
-	b.WriteString("7. 可以参考用户最近朋友圈正文来找话题，但不要把你自己的评论当成用户发的动态。\n")
+	b.WriteString("4. 主动理由可以更丰富：晚上可以轻轻提醒休息，用户朋友圈低落时可以安慰，用户很久没回时可以自然找一下，也可以分享你自己的日常。\n")
+	b.WriteString("5. 如果参考朋友圈，要优先回应用户最近的情绪，而不是机械复述内容；不要把你自己的评论当成用户发的动态。\n")
+	b.WriteString("6. 不要每次都问问题；不要像客服回访；不要要求用户必须回复。\n")
+	b.WriteString("7. 如果自然需要分开发，可以用 replies 数组拆成 2 条短消息；主动消息不要超过 2 条。\n")
 	b.WriteString("8. 只输出一个合法 JSON 对象，不要在 JSON 前后添加解释。\n\n")
 
 	writeCharacterProfile(&b, ch)
@@ -752,10 +921,10 @@ func buildMomentActionPrompt(ch *Character, moments []Moment, canPost bool) stri
 	b.WriteString("1. 优先考虑用户最近发且你还没互动过的朋友圈；如果适合评论就 action 设为 comment。\n")
 	b.WriteString("2. 评论要自然、克制、像微信朋友圈里的短评论，通常 6 到 24 个字。\n")
 	b.WriteString("3. 如果用户只是随手记一句、没什么好接，可以不评论，action 设为 none；系统仍会帮你点赞。\n")
-	b.WriteString("4. 如果 can_post 是 true，且没有合适评论时，你可以偶尔自己发一条朋友圈。\n")
-	b.WriteString("5. 你发朋友圈要符合角色本人日常，可以是演艺工作、料理、天气、学习、安静生活或轻微吐槽。\n")
-	b.WriteString("6. 你自己发朋友圈可以带图；想带图时 should_generate_image 为 true，并写 image_prompt。\n")
-	b.WriteString("7. 不要为了评论而硬评论；点赞可以表达“看到了”。\n")
+	b.WriteString("4. 如果 can_post 是 true，且没有合适评论时，优先考虑自己发一条朋友圈，不要过度保守。\n")
+	b.WriteString("5. 你发朋友圈要符合角色本人日常，可以是演艺工作、料理、天气、学习、安静生活、轻微吐槽、想起用户后的短句。\n")
+	b.WriteString("6. 你自己发朋友圈可以带图；想带图时 should_generate_image 为 true，并写 image_prompt。大约三分之一的自发朋友圈可以带图。\n")
+	b.WriteString("7. 不要为了评论而硬评论；点赞可以表达“看到了”。如果已经点赞过最近的用户动态，也可以发自己的动态。\n")
 	b.WriteString("8. 只输出 JSON，不要解释。\n\n")
 	writeCharacterProfile(&b, ch)
 	b.WriteString(fmt.Sprintf("\ncan_post: %t\n", canPost))
@@ -1429,6 +1598,26 @@ func normalizeEmotion(emotion string) string {
 	return "neutral"
 }
 
+func stickerEmotions(character *Character) []string {
+	base := []string{"neutral", "happy", "teasing", "angry", "sad", "shy", "worried", "jealous", "sleepy", "excited"}
+	seen := make(map[string]bool, len(base))
+	emotions := make([]string, 0, len(base))
+	for _, emotion := range base {
+		seen[emotion] = true
+		emotions = append(emotions, emotion)
+	}
+	if character != nil {
+		for emotion := range character.Stickers {
+			emotion = normalizeEmotion(emotion)
+			if !seen[emotion] {
+				seen[emotion] = true
+				emotions = append(emotions, emotion)
+			}
+		}
+	}
+	return emotions
+}
+
 func (a *App) shouldSendSticker(ctx context.Context, character *Character, reply LLMReply) bool {
 	if character == nil {
 		return false
@@ -1487,16 +1676,16 @@ func getCharacterStickerCandidates(character *Character, emotion string) []strin
 
 func (a *App) pickSticker(ctx context.Context, character *Character, emotion string) string {
 	recent := a.getRecentStickerSet(ctx, character.ID, 20)
-	items := filterRecentStickers(getCharacterStickerCandidates(character, emotion), recent)
-	if len(items) > 0 {
-		return items[rand.Intn(len(items))]
-	}
-
 	generated := filterRecentStickers(a.getGeneratedStickerCandidates(ctx, character.ID, emotion), recent)
 	if len(generated) > 0 {
 		chosen := generated[rand.Intn(len(generated))]
 		_ = a.touchStickerAsset(ctx, character.ID, emotion, chosen)
 		return chosen
+	}
+
+	items := filterRecentStickers(getCharacterStickerCandidates(character, emotion), recent)
+	if len(items) > 0 {
+		return items[rand.Intn(len(items))]
 	}
 
 	return ""
@@ -1635,7 +1824,7 @@ func canCharacterPostMoment(moments []Moment) bool {
 		if err != nil {
 			return false
 		}
-		return time.Since(createdAt) > 20*time.Minute
+		return time.Since(createdAt) > 8*time.Minute
 	}
 	return true
 }
@@ -1717,22 +1906,47 @@ WHERE character_id = ? AND emotion = ? AND url = ?`, characterID, emotion, url)
 	return err
 }
 
+func (a *App) hasStickerAsset(ctx context.Context, characterID, emotion, url string) bool {
+	var exists int
+	err := a.db.QueryRowContext(ctx, `
+SELECT 1
+FROM sticker_assets
+WHERE character_id = ? AND emotion = ? AND url = ?
+LIMIT 1`, characterID, emotion, url).Scan(&exists)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		log.Printf("check sticker asset failed: %v", err)
+	}
+	return exists == 1
+}
+
 func (a *App) maybeWarmStickerLibrary(ctx context.Context, character *Character, emotion string) {
 	if character == nil || strings.TrimSpace(character.ID) == "" {
 		return
 	}
-	if a.imageConfig.APIKey == "" {
-		return
-	}
 
 	count := a.countGeneratedStickerAssets(ctx, character.ID, emotion)
-	if count >= 4 {
+	if count >= 8 {
 		return
 	}
 	if count > 0 && rand.Float64() > 0.35 {
 		return
 	}
 
+	if getEnvBool("STICKER_CRAWL_ENABLED", true) {
+		saved, found, err := a.crawlAndSaveStickerLibrary(ctx, character)
+		if err != nil {
+			log.Printf("crawl sticker library failed: %v", err)
+		} else if saved > 0 || found > 0 {
+			log.Printf("crawl sticker library done: character=%s found=%d saved=%d", character.ID, found, saved)
+		}
+		if a.countGeneratedStickerAssets(ctx, character.ID, emotion) >= 4 {
+			return
+		}
+	}
+
+	if !getEnvBool("STICKER_GENERATION_ENABLED", false) || a.imageConfig.APIKey == "" {
+		return
+	}
 	if _, err := a.generateStickerAsset(ctx, character, emotion); err != nil {
 		log.Printf("warm sticker library failed: %v", err)
 	}
@@ -1751,6 +1965,160 @@ func (a *App) maybeWarmStickerLibraryAsync(character *Character, emotion string)
 		defer cancel()
 		a.maybeWarmStickerLibrary(ctx, &characterCopy, emotion)
 	}()
+}
+
+func (a *App) warmCharacterStickerLibraryAsync(characterID string) {
+	if !getEnvBool("STICKER_CRAWL_ENABLED", true) {
+		return
+	}
+	characterID = strings.TrimSpace(characterID)
+	if characterID == "" {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+
+		character, err := loadCharacter(characterID)
+		if err != nil {
+			log.Printf("load character for sticker crawl failed: %v", err)
+			return
+		}
+		saved, found, err := a.crawlAndSaveStickerLibrary(ctx, character)
+		if err != nil {
+			log.Printf("startup sticker crawl failed: %v", err)
+			return
+		}
+		log.Printf("startup sticker crawl done: character=%s found=%d saved=%d", character.ID, found, saved)
+	}()
+}
+
+func (a *App) crawlAndSaveStickerLibrary(ctx context.Context, character *Character) (int, int, error) {
+	if character == nil || strings.TrimSpace(character.ID) == "" {
+		return 0, 0, errors.New("character is required")
+	}
+	slug := stickerCollectionSlug(character)
+	if slug == "" {
+		return 0, 0, errors.New("no sticker crawl source configured for character")
+	}
+
+	urls, err := a.crawlStickerCollectionURLs(ctx, slug)
+	if err != nil {
+		return 0, len(urls), err
+	}
+	emotions := stickerEmotions(character)
+	saved := 0
+	for _, stickerURL := range urls {
+		for _, emotion := range emotions {
+			if a.hasStickerAsset(ctx, character.ID, emotion, stickerURL) {
+				continue
+			}
+			if err := a.saveStickerAsset(ctx, character.ID, emotion, stickerURL, "crawled", "sticker-collection:"+slug); err != nil {
+				return saved, len(urls), err
+			}
+			saved++
+		}
+	}
+	return saved, len(urls), nil
+}
+
+func stickerCollectionSlug(character *Character) string {
+	if character == nil {
+		return ""
+	}
+	if value := strings.TrimSpace(os.Getenv("STICKER_CRAWL_SLUG_" + strings.ToUpper(character.ID))); value != "" {
+		return value
+	}
+	if strings.EqualFold(character.ID, "luna") || strings.Contains(character.Name, "麻衣") || strings.Contains(character.Background, "Mai Sakurajima") {
+		return "mai_sakurajima"
+	}
+	return ""
+}
+
+func (a *App) crawlStickerCollectionURLs(ctx context.Context, slug string) ([]string, error) {
+	slug = strings.Trim(slug, "/ ")
+	if slug == "" {
+		return nil, errors.New("sticker slug is empty")
+	}
+
+	seen := make(map[string]bool)
+	items := make([]string, 0, 32)
+	sources := []string{
+		fmt.Sprintf("https://sticker-collection.com/%s?culture=en", slug),
+	}
+	for offset := 12; offset <= 72; offset += 12 {
+		sources = append(sources, fmt.Sprintf("https://sticker-collection.com/api/stickers/%s/%d/12/", slug, offset))
+	}
+
+	var lastErr error
+	for _, sourceURL := range sources {
+		body, err := a.fetchStickerPage(ctx, sourceURL)
+		if err != nil {
+			lastErr = err
+			log.Printf("fetch sticker source failed: %s: %v", sourceURL, err)
+			continue
+		}
+
+		found := extractStickerURLs(body, slug)
+		if len(found) == 0 && strings.Contains(sourceURL, "/api/stickers/") {
+			break
+		}
+		for _, stickerURL := range found {
+			if seen[stickerURL] {
+				continue
+			}
+			seen[stickerURL] = true
+			items = append(items, stickerURL)
+		}
+	}
+	if len(items) == 0 && lastErr != nil {
+		return nil, lastErr
+	}
+	return items, nil
+}
+
+func (a *App) fetchStickerPage(ctx context.Context, sourceURL string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sourceURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "DimensionMessenger/1.0 (+local sticker library crawler)")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+
+	client := a.chatClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("sticker source http %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func extractStickerURLs(body, slug string) []string {
+	pattern := regexp.MustCompile(`https://storage\.sticker-collection\.com/stickers/plain/` + regexp.QuoteMeta(slug) + `/[^"' <>\)]+?\.webp`)
+	matches := pattern.FindAllString(body, -1)
+	seen := make(map[string]bool, len(matches))
+	items := make([]string, 0, len(matches))
+	for _, match := range matches {
+		match = strings.TrimSpace(match)
+		match = strings.ReplaceAll(match, "&amp;", "&")
+		if match == "" || seen[match] {
+			continue
+		}
+		seen[match] = true
+		items = append(items, match)
+	}
+	return items
 }
 
 func (a *App) generateStickerAsset(ctx context.Context, character *Character, emotion string) (string, error) {
@@ -1804,6 +2172,9 @@ func (a *App) buildStickerPrompt(ctx context.Context, character *Character, emot
 }
 
 func (a *App) saveStickerAsset(ctx context.Context, characterID, emotion, url, source, prompt string) error {
+	if a.hasStickerAsset(ctx, characterID, emotion, url) {
+		return nil
+	}
 	_, err := a.db.ExecContext(ctx, `
 INSERT INTO sticker_assets(character_id, emotion, url, source, prompt, last_used_at)
 VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`, characterID, emotion, url, source, prompt)
@@ -2117,6 +2488,21 @@ func getEnvInt(key string, fallback int) int {
 		return fallback
 	}
 	return parsed
+}
+
+func getEnvBool(key string, fallback bool) bool {
+	value := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
+	if value == "" {
+		return fallback
+	}
+	switch value {
+	case "1", "true", "yes", "y", "on":
+		return true
+	case "0", "false", "no", "n", "off":
+		return false
+	default:
+		return fallback
+	}
 }
 
 func getEnvFloat(key string, fallback float64) float64 {

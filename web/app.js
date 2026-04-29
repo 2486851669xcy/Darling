@@ -67,8 +67,8 @@ const firstProactiveDelayRange = {
 };
 
 const momentCheckDelayRange = {
-  min: 90 * 1000,
-  max: 240 * 1000,
+  min: 45 * 1000,
+  max: 120 * 1000,
 };
 
 function getAudioContext() {
@@ -148,6 +148,21 @@ async function sendMessage(text) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ character_id: characterId, message: text }),
+  });
+
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || '发送失败');
+  }
+
+  return response.json();
+}
+
+async function sendMessageBatch(messages) {
+  const response = await fetch('/api/chat/send_batch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ character_id: characterId, messages }),
   });
 
   if (!response.ok) {
@@ -653,8 +668,9 @@ function randomBetween(min, max) {
   return Math.floor(min + Math.random() * (max - min + 1));
 }
 
-function markPendingUserMessagesRead() {
-  state.pendingUserRows.forEach((row) => {
+function markPendingUserMessagesRead(batch) {
+  batch.forEach((item) => {
+    const row = item.row;
     row.querySelector('.bubble-read-status')?.classList.add('read');
   });
   state.pendingUserRows = [];
@@ -749,15 +765,22 @@ async function flushUserMessages() {
   state.pendingUserMessages = [];
   state.isWaitingForAI = true;
   const draftText = messageInput.value;
-  const mergedText = batch.join('\n\n');
+  const texts = batch.map((item) => item.text);
 
-  markPendingUserMessagesRead();
+  markPendingUserMessagesRead(batch);
   setLoading(true, { showTyping: false });
 
   try {
     await wait(randomBetween(700, 1300));
     showTypingBubble();
-    const result = await sendMessage(mergedText);
+    const result = await sendMessageBatch(texts);
+    if (Array.isArray(result.user_messages)) {
+      result.user_messages.forEach((savedMessage, index) => {
+        if (batch[index]?.message) {
+          Object.assign(batch[index].message, savedMessage);
+        }
+      });
+    }
     const messages = Array.isArray(result.messages) ? result.messages : [];
     await appendMessagesSequentially(messages, { playReceiveSound: messages.length > 0 });
     scheduleProactiveMessage();
@@ -927,7 +950,11 @@ function handleSend() {
   };
   appendMessage(optimistic);
   playMessageSound('send');
-  state.pendingUserMessages.push(text);
+  state.pendingUserMessages.push({
+    text,
+    row: state.lastUserBubble,
+    message: optimistic,
+  });
   messageInput.value = '';
   scheduleFlushUserMessages();
 }
