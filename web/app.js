@@ -72,15 +72,17 @@ function createBubble(message) {
   const row = document.createElement('div');
   row.className = `message-row ${message.sender}`;
 
+  const isMediaMessage = message.type === 'sticker' || message.type === 'image';
+
   const avatar = document.createElement('img');
   avatar.className = 'avatar';
   avatar.src = getAvatarUrl(message.sender);
   avatar.alt = message.sender === 'user' ? '我的头像' : `${state.character.name || '角色'}头像`;
 
   const bubble = document.createElement('div');
-  bubble.className = 'bubble';
+  bubble.className = isMediaMessage ? 'bubble media-bubble' : 'bubble';
 
-  if (message.type === 'sticker' || message.type === 'image') {
+  if (isMediaMessage) {
     const img = document.createElement('img');
     img.src = message.content;
     img.alt = message.type === 'sticker' ? 'sticker' : 'generated image';
