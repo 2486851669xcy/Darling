@@ -1,88 +1,184 @@
 # DimensionMessenger Demo
 
-一个本地可运行的沉浸式二次元 AI 聊天 Demo。
+一个本地可运行的二次元陪伴聊天 Demo。
 
-这个项目当前定位是 **本地原型 / Demo**：
+它看起来像一个迷你微信：有消息、联系人、朋友圈、我的。你可以和角色聊天，也可以发朋友圈。她不只是被动回你，偶尔也会主动找你，看到你的朋友圈后也可能评论，甚至自己发一条带图朋友圈。
 
-- 先快速验证“二次元角色聊天”这件事是否好玩
-- 先把角色人设、聊天体验、表情包机制跑通
-- 先用最轻量的本地方案完成可玩的版本
-
-它不是最终形态，但它已经具备了后续继续扩展成正式产品的基础。
-
-当前版本支持：
-
-- 类即时通讯聊天界面
-- Go + Gin 后端
-- SQLite 本地聊天记录存储
-- 通义千问 OpenAI-Compatible API
-- YAML 角色卡配置
-- 角色头像 / 用户头像 URL 配置
-- 按情绪发送角色表情包 URL
-
-目前默认角色已经配置为 **樱岛麻衣** 风格。
+默认角色是 **樱岛麻衣** 风格，你也可以把她改成任何你想要的角色。
 
 ---
 
-## 截图
+## 截图怎么放
 
-你可以把项目截图放到下面这个目录：
+截图只放用户能看到的界面，不需要上传配置文件截图。
 
-```text README.md
+目录：
+
+```text
 docs/screenshots/
 ```
 
-推荐文件名：
+推荐命名：
 
-```text README.md
-docs/screenshots/chat-main.png
-docs/screenshots/chat-sticker.png
-docs/screenshots/chat-persona.png
-docs/screenshots/yaml-config.png
+```text
+docs/screenshots/messages-home.png
+docs/screenshots/chat-detail.png
+docs/screenshots/moments-home.png
+docs/screenshots/contacts-home.png
+docs/screenshots/profile-home.png
+docs/screenshots/notification-toast.png
+docs/screenshots/ai-moment.png
 ```
 
-当前已放入两张示例截图：
+这些图分别是什么：
 
-### 聊天主界面
+- `messages-home.png`：消息主页，也就是能看到“麻衣”会话列表的那一页。
+- `chat-detail.png`：点进麻衣后的聊天页，展示气泡、头像、时间等。
+- `moments-home.png`：朋友圈主页，展示用户发的朋友圈和 AI 评论。
+- `contacts-home.png`：联系人页，展示联系人列表里的麻衣。
+- `profile-home.png`：我的页，类似微信“我”的页面。
+- `notification-toast.png`：AI 发消息或朋友圈更新时，顶部弹出的提醒和红点。
+- `ai-moment.png`：AI 自己发朋友圈，或者 AI 评论你朋友圈的截图。
+
+如果只想先放几张，优先放这三张：
+
+```text
+docs/screenshots/messages-home.png
+docs/screenshots/chat-detail.png
+docs/screenshots/moments-home.png
+```
+
+当前仓库里还有两张旧截图，后面可以用新版截图替换：
+
 ![聊天主界面](docs/screenshots/chat-main.png)
 
-### 人设回复示例
 ![人设回复示例](docs/screenshots/chat-persona.png)
-
-如果你后面继续补图，可以继续使用这些文件名：
-
-<!--
-### 表情包触发示例
-![表情包触发示例](docs/screenshots/chat-sticker.png)
-
-### YAML 配置示例
-![YAML 配置示例](docs/screenshots/yaml-config.png)
--->
 
 ---
 
-## 功能特性
+## 它能怎么玩
 
-- 本地启动，打开浏览器即可聊天
-- 聊天记录保存到 `dimension.db`
-- 每次对话会读取最近聊天记录，保持上下文
-- 角色人设写在 YAML 里，方便改角色
-- 头像和表情包支持直接配置远程 URL，不需要保存在本地
-- 表情包发送不再完全依赖模型，可按情绪概率自动触发
+你可以把它当成一个本地版“角色微信”。
+
+- 和角色聊天，她会按人设说话，不会像客服。
+- 她可以一条一条连续发消息，而不是每次都吐一大段。
+- 她觉得没什么好回的时候，也可以自然结束，不硬接话。
+- 她会偶尔主动找你，不需要每次都你先开口。
+- 她会发符合情绪的表情包，但不会疯狂刷同一张。
+- 聊天有发送和接收提示音，更像真实聊天。
+- 消息隔了几分钟，会像微信一样显示居中的时间。
+- 你可以发文字朋友圈。
+- 她会隔一段时间看看你的朋友圈，觉得合适就评论。
+- 她也可能自己发朋友圈，而且可以带 AI 生成的图。
+- 你在聊天里问她“我朋友圈刚刚说了什么”，她能参考最近朋友圈正文。
+- 如果你不在聊天页或朋友圈页，AI 更新会弹顶部提示，也会在入口显示红点。
+
+---
+
+## 快速开始
+
+### 1. 准备环境
+
+需要：
+
+- Go 1.22+
+- 一个聊天模型 API Key
+- 如果想让 AI 发图，再准备一个图片模型 API Key
+
+### 2. 配置 `.env`
+
+在项目根目录新建 `.env`：
+
+```env
+AI_MID_API_KEY=your_chat_api_key
+AI_MID_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+AI_MID_MODEL=qwen-plus
+AI_MID_TEMPERATURE=0.7
+AI_MID_MAX_TOKENS=4096
+AI_MID_TIMEOUT=120
+
+AI_HIGH_API_KEY=your_image_api_key
+AI_HIGH_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
+AI_HIGH_MODEL=gemini-2.5-flash-image
+AI_HIGH_TEMPERATURE=0.8
+AI_HIGH_MAX_TOKENS=4096
+AI_HIGH_TIMEOUT=300
+```
+
+只聊天的话，先配 `AI_MID_*` 就可以。想让 AI 朋友圈带图，再配 `AI_HIGH_*`。
+
+不要把真实 API Key 提交到 Git。
+
+### 3. 启动
+
+```powershell
+go run .
+```
+
+浏览器打开：
+
+```text
+http://localhost:8080
+```
+
+---
+
+## 怎么改角色
+
+角色配置在：
+
+```text
+data/characters/luna.yaml
+```
+
+常改的地方：
+
+- `name`：角色名字。
+- `avatar`：角色头像。
+- `user_avatar`：你的头像。
+- `relationship`：你们的关系。
+- `background`：角色背景。
+- `personality`：性格关键词。
+- `speech_style`：说话风格。
+- `rules`：角色必须遵守的规则。
+- `stickers`：不同情绪下可发的表情包图片。
+
+表情包示例：
+
+```yaml
+stickers:
+  happy:
+    - https://your-cdn.com/mai/happy_1.png
+    - https://your-cdn.com/mai/happy_2.png
+  shy:
+    - https://your-cdn.com/mai/shy_1.png
+  teasing:
+    - https://your-cdn.com/mai/teasing_1.png
+```
+
+建议使用稳定图片直链，不要用容易失效的搜索缩略图。
+
+---
+
+## 小提示
+
+- 改了 `main.go` 或 `.env` 后，需要重启后端。
+- 改了 `web/app.js`、`web/style.css`、`web/index.html` 后，刷新页面即可。
+- 聊天记录、朋友圈和评论都存在 `dimension.db`。
+- 如果她不知道你朋友圈说了什么，先确认后端已经重启。
+- 主动消息和朋友圈检查不是固定时间触发，等一会儿才会出现。
 
 ---
 
 ## 项目结构
 
-```text README.md
+```text
 .
 ├─ data/
 │  └─ characters/
 │     └─ luna.yaml
 ├─ docs/
 │  └─ screenshots/
-│     ├─ chat-main.png
-│     └─ chat-persona.png
 ├─ web/
 │  ├─ app.js
 │  ├─ index.html
@@ -94,374 +190,15 @@ docs/screenshots/yaml-config.png
 
 ---
 
-## 环境要求
-
-- Go 1.22+
-- 一个可用的通义千问 / OpenAI-Compatible API Key
-
----
-
-## 环境变量与 `.env`
-
-项目支持从根目录的 `.env` 文件自动读取配置。
-
-也就是说，**你现在不需要每次都手写 PowerShell 的 `$env:`**。
-
-### 1. 在项目根目录创建 `.env`
-
-```env README.md
-AI_MID_API_KEY=your_api_key
-AI_MID_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-AI_MID_MODEL=qwen-plus
-AI_MID_TEMPERATURE=0.7
-AI_MID_MAX_TOKENS=4096
-AI_MID_TIMEOUT=120
-```
-
-如果你使用阿里云百炼 / DashScope OpenAI 兼容接口，通常这样配就可以。
-
-### 2. 启动项目
-
-```powershell README.md
-go run .
-```
-
-### 3. 打开浏览器
-
-```text README.md
-http://localhost:8080
-```
-
-### 4. 补充说明
-
-- 如果系统环境变量和 `.env` 同时存在，**系统环境变量优先**
-- `.env` 不应该提交到 Git 仓库
-- API Key 泄露后请立刻重置
-
----
-
-## 如何使用
-
-### 第一步：配置大模型
-
-在根目录创建 `.env`，填入你自己的模型配置。
-
-### 第二步：配置角色
-
-编辑：
-
-```text README.md
-data/characters/luna.yaml
-```
-
-你可以修改：
-
-- 角色名称
-- 角色背景
-- 性格与说话风格
-- 角色规则
-- 角色头像 URL
-- 用户头像 URL
-- 不同情绪下的表情包 URL
-
-### 第三步：启动项目
-
-```powershell README.md
-go run .
-```
-
-### 第四步：开始聊天
-
-浏览器打开：
-
-```text README.md
-http://localhost:8080
-```
-
-然后你就可以：
-
-- 输入消息和角色聊天
-- 观察角色是否保持人设
-- 测试不同情绪下的表情包返回
-- 清空聊天记录重新测试
-
----
-
-## 角色配置
-
-角色配置文件位置：
-
-```text README.md
-data/characters/luna.yaml
-```
-
-你可以在这里修改：
-
-- 角色名称
-- 背景设定
-- 性格
-- 说话风格
-- 规则
-- 角色头像 URL
-- 用户头像 URL
-- 表情包 URL
-
----
-
-## 头像和表情包 URL 配置
-
-当前已经支持直接在 YAML 里配置远程图片地址。
-
-示例：
-
-```yaml README.md
-id: luna
-name: 樱岛麻衣
-avatar: https://your-cdn.com/mai/avatar.png
-user_avatar: https://your-cdn.com/user/avatar.png
-
-stickers:
-  happy:
-    - https://your-cdn.com/mai/happy_1.png
-    - https://your-cdn.com/mai/happy_2.png
-  shy:
-    - https://your-cdn.com/mai/shy_1.png
-  angry:
-    - https://your-cdn.com/mai/angry_1.png
-  sad:
-    - https://your-cdn.com/mai/sad_1.png
-  worried:
-    - https://your-cdn.com/mai/worried_1.png
-  jealous:
-    - https://your-cdn.com/mai/jealous_1.png
-  teasing:
-    - https://your-cdn.com/mai/teasing_1.png
-  sleepy:
-    - https://your-cdn.com/mai/sleepy_1.png
-```
-
-说明：
-
-- `avatar` 是角色头像
-- `user_avatar` 是用户头像
-- `stickers` 按情绪分组
-- 每个情绪可以配置多张图，系统会随机选择一张
-
-建议使用稳定的图片直链，不建议使用容易失效的搜索缩略图链接。
-
----
-
-## 表情包触发逻辑
-
-表情包触发分两层：
-
-1. 模型主动要求发图
-2. 即使模型没要求，只要当前情绪明显且该情绪配置了表情包，也会按概率自动发图
-
-当前高频情绪：
-
-- `happy`
-- `shy`
-- `worried`
-- `jealous`
-- `teasing`
-- `excited`
-
-中频情绪：
-
-- `sad`
-- `angry`
-- `sleepy`
-
-支持的情绪枚举：
-
-```text README.md
-neutral
-happy
-angry
-sad
-shy
-teasing
-worried
-jealous
-sleepy
-excited
-```
-
-其中 `excited` 如果没有单独配置，会回退使用 `happy` 的表情包。
-
----
-
-## 接口说明
-
-### 获取角色配置
-
-```http README.md
-GET /api/character?character_id=luna
-```
-
-### 获取聊天记录
-
-```http README.md
-GET /api/messages?character_id=luna
-```
-
-### 发送消息
-
-```http README.md
-POST /api/chat/send
-Content-Type: application/json
-```
-
-请求体：
-
-```json README.md
-{
-  "character_id": "luna",
-  "message": "喜欢你"
-}
-```
-
-### 清空聊天记录
-
-```http README.md
-POST /api/messages/clear?character_id=luna
-```
-
----
-
-## 常见问题
-
-### 1. 头像不显示
-
-检查：
-
-- `avatar` / `user_avatar` 是否是可直接访问的图片 URL
-- 浏览器里单独打开图片 URL 是否能直接看到图片
-
-### 2. 表情包不显示
-
-检查：
-
-- 当前情绪是否在 `stickers` 里配置了图片
-- 图片 URL 是否稳定
-- 是否用了搜索缩略图或防盗链地址
-
-### 3. 表情包频率太低
-
-当前代码已经做了概率补偿。如果你还想更高，可以继续调整 `main.go` 里的 `shouldSendSticker` 逻辑。
-
-### 4. 想改角色
-
-直接复制一份 YAML，修改角色人设、头像和表情包地址即可。
-
----
-
-## 注意事项
-
-- 请不要把真实 API Key 提交到 Git 仓库
-- 如果 API Key 泄露，请立刻去控制台重置
-- 如果使用受版权保护的角色图片，请自行注意使用范围
-- 远程图片 URL 尽量使用稳定图床或自己的对象存储
-
----
-
-## 当前 Demo 的定位
-
-当前版本更像一个 **可玩的产品原型**，主要解决的是：
-
-- 本地能不能快速跑起来
-- AI 角色聊天是否有感觉
-- 人设 + 上下文 + 表情包 的组合是否成立
-- 用 SQLite + YAML + 单页前端是否足够支撑第一阶段验证
-
-所以这个阶段优先级是：
-
-1. 好玩
-2. 可调试
-3. 易改角色
-4. 本地一键可跑
-
-而不是：
-
-- 大规模部署
-- 复杂账号体系
-- 高并发架构
-- 完整商业化后台
-
----
-
-## 后面会如何发展
-
-如果继续往下做，这个项目可以自然演进成更正式的版本。
-
-### Phase 1：完善当前 Demo
-
-目标：把当前本地 Demo 打磨到更稳定、更像产品。
-
-可以继续做：
-
-- 多角色切换
-- 更完善的 YAML 配置
-- 更稳定的图片兜底
-- 调试信息面板
-- 更像聊天软件的 UI
-- 关键词触发表情包 / 特殊回复
-
-### Phase 2：升级前端
-
-目标：从当前单页静态前端升级到更正式的前端工程。
-
-可以继续做：
-
-- React / TypeScript 前端
-- 更细的状态管理
-- 聊天列表页
-- 角色选择页
-- 角色编辑页
-- 表情包管理页
-
-### Phase 3：增强角色能力
-
-目标：让角色不只是“答一句话”，而是更像有持续人格的陪伴对象。
-
-可以继续做：
-
-- 长期记忆
-- 好感度系统
-- 剧情分支
-- 主动发消息
-- 节日 / 早晚安 / 特殊事件互动
-- 更强的人设一致性
-
-### Phase 4：更完整的产品化
-
-目标：从个人 Demo 走向可分享、可部署、可扩展的应用。
-
-可以继续做：
-
-- 多用户支持
-- 账号体系
-- 云端部署
-- 角色市场
-- 用户自定义角色
-- AI 生成表情包 / 立绘
-- 语音聊天
-
----
-
-## 后续可扩展方向
-
-- 多角色切换
-- React / TypeScript 前端
-- 主动发消息
-- 长期记忆
-- 剧情系统
-- AI 生成角色表情包
-- 语音聊天
-- 多用户支持
-- 角色编辑器
-- 角色市场
+## 接下来可以继续加
+
+- 朋友圈图片上传。
+- 多角色切换。
+- 更长期的记忆。
+- 好感度或事件系统。
+- 语音消息。
+- 更像微信的细节动画。
+- 角色编辑器。
 
 ---
 
