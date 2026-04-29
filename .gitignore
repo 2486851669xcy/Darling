@@ -3,3 +3,4 @@
 *.db-*
 dimension.db
 .DS_Store
+data/generated/

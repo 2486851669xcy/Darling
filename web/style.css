@@ -138,6 +138,12 @@ body {
   border-radius: 14px;
 }
 
+.generated-image {
+  max-width: 220px;
+  display: block;
+  border-radius: 16px;
+}
+
 .typing-indicator {
   padding: 8px 16px;
   background: #f6f6f6;

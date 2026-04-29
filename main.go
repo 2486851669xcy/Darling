@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -65,10 +66,12 @@ type SendChatResponse struct {
 }
 
 type LLMReply struct {
-	Emotion           string `json:"emotion"`
-	Reply             string `json:"reply"`
-	ShouldSendSticker bool   `json:"should_send_sticker"`
-	StickerQuery      string `json:"sticker_query"`
+	Emotion             string `json:"emotion"`
+	Reply               string `json:"reply"`
+	ShouldSendSticker   bool   `json:"should_send_sticker"`
+	StickerQuery        string `json:"sticker_query"`
+	ShouldGenerateImage bool   `json:"should_generate_image"`
+	ImagePrompt         string `json:"image_prompt"`
 }
 
 type AIConfig struct {
@@ -81,9 +84,11 @@ type AIConfig struct {
 }
 
 type App struct {
-	db       *sql.DB
-	aiConfig AIConfig
-	client   *http.Client
+	db          *sql.DB
+	chatConfig  AIConfig
+	imageConfig AIConfig
+	chatClient  *http.Client
+	imageClient *http.Client
 }
 
 func main() {
@@ -109,9 +114,13 @@ func main() {
 	r.POST("/api/messages/clear", app.handleClearMessages)
 
 	log.Println("DimensionMessenger demo started: http://localhost:8080")
-	log.Printf("AI model: %s, base_url: %s", app.aiConfig.Model, app.aiConfig.BaseURL)
-	if app.aiConfig.APIKey == "" {
+	log.Printf("Chat model: %s, base_url: %s", app.chatConfig.Model, app.chatConfig.BaseURL)
+	log.Printf("Image model: %s, base_url: %s", app.imageConfig.Model, app.imageConfig.BaseURL)
+	if app.chatConfig.APIKey == "" {
 		log.Println("WARNING: AI_MID_API_KEY is empty. Set it before chatting.")
+	}
+	if app.imageConfig.APIKey == "" {
+		log.Println("WARNING: AI_HIGH_API_KEY is empty. Image generation will be skipped.")
 	}
 
 	if err := r.Run(":8080"); err != nil {
@@ -129,12 +138,18 @@ func NewApp() (*App, error) {
 		return nil, err
 	}
 
-	cfg := loadAIConfig()
+	chatCfg := loadChatConfig()
+	imageCfg := loadImageConfig()
+
 	return &App{
-		db:       db,
-		aiConfig: cfg,
-		client: &http.Client{
-			Timeout: time.Duration(cfg.TimeoutSec) * time.Second,
+		db:          db,
+		chatConfig:  chatCfg,
+		imageConfig: imageCfg,
+		chatClient: &http.Client{
+			Timeout: time.Duration(chatCfg.TimeoutSec) * time.Second,
+		},
+		imageClient: &http.Client{
+			Timeout: time.Duration(imageCfg.TimeoutSec) * time.Second,
 		},
 	}, nil
 }
@@ -154,7 +169,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_character_created ON messages(character_
 	return err
 }
 
-func loadAIConfig() AIConfig {
+func loadChatConfig() AIConfig {
 	return AIConfig{
 		BaseURL:     getEnv("AI_MID_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
 		APIKey:      getEnv("AI_MID_API_KEY", ""),
@@ -162,6 +177,17 @@ func loadAIConfig() AIConfig {
 		Temperature: getEnvFloat("AI_MID_TEMPERATURE", 0.7),
 		MaxTokens:   getEnvInt("AI_MID_MAX_TOKENS", 4096),
 		TimeoutSec:  getEnvInt("AI_MID_TIMEOUT", 120),
+	}
+}
+
+func loadImageConfig() AIConfig {
+	return AIConfig{
+		BaseURL:     getEnv("AI_HIGH_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/"),
+		APIKey:      getEnv("AI_HIGH_API_KEY", ""),
+		Model:       getEnv("AI_HIGH_MODEL", "gemini-2.5-flash-image"),
+		Temperature: getEnvFloat("AI_HIGH_TEMPERATURE", 0.8),
+		MaxTokens:   getEnvInt("AI_HIGH_MAX_TOKENS", 4096),
+		TimeoutSec:  getEnvInt("AI_HIGH_TIMEOUT", 300),
 	}
 }
 
@@ -240,12 +266,19 @@ func (a *App) handleSendChat(c *gin.Context) {
 	parsed, err := parseLLMReply(raw)
 	if err != nil {
 		log.Printf("parse llm json error: %v, raw=%s", err, raw)
-		parsed = LLMReply{Emotion: "neutral", Reply: "欸……我刚刚有点走神了，可以再说一次吗？", ShouldSendSticker: false}
+		parsed = LLMReply{
+			Emotion:             "neutral",
+			Reply:               "唔……我刚刚有点走神了，可以再说一次吗？",
+			ShouldSendSticker:   false,
+			ShouldGenerateImage: false,
+		}
 	}
+
 	parsed.Emotion = normalizeEmotion(parsed.Emotion)
 	parsed.Reply = strings.TrimSpace(parsed.Reply)
+	parsed.ImagePrompt = strings.TrimSpace(parsed.ImagePrompt)
 	if parsed.Reply == "" {
-		parsed.Reply = "嗯嗯，我在听呢。"
+		parsed.Reply = "嗯哼，我在听哦。"
 	}
 
 	characterMsg, err := a.saveMessage(c.Request.Context(), req.CharacterID, "character", "text", parsed.Reply)
@@ -260,6 +293,18 @@ func (a *App) handleSendChat(c *gin.Context) {
 			stickerMsg, err := a.saveMessage(c.Request.Context(), req.CharacterID, "character", "sticker", stickerURL)
 			if err == nil {
 				result = append(result, stickerMsg)
+			}
+		}
+	}
+
+	if shouldGenerateImage(parsed) {
+		imageURL, err := a.generateCharacterImage(c.Request.Context(), character, req.Message, parsed)
+		if err != nil {
+			log.Printf("image generation skipped: %v", err)
+		} else if imageURL != "" {
+			imageMsg, err := a.saveMessage(c.Request.Context(), req.CharacterID, "character", "image", imageURL)
+			if err == nil {
+				result = append(result, imageMsg)
 			}
 		}
 	}
@@ -291,7 +336,10 @@ func buildPrompt(ch *Character, recent []Message, userMessage string) string {
 	b.WriteString("4. 可以表达情绪，比如开心、害羞、生气、担心、难过。\n")
 	b.WriteString("5. 不要输出 Markdown，不要输出代码块。\n")
 	b.WriteString("6. 只能输出一个合法 JSON 对象，不要在 JSON 前后添加任何解释。\n")
-	b.WriteString("7. 不要复述用户的话，要像真实聊天一样回应。\n\n")
+	b.WriteString("7. 不要复述用户的话，要像真实聊天一样回应。\n")
+	b.WriteString("8. 只有在两种情况下才把 should_generate_image 设为 true：用户明确想看你发来的照片/自拍/图片，或者当前很适合奖励用户一张你主动发出的照片。\n")
+	b.WriteString("9. 如果 should_generate_image 为 true，image_prompt 必须写成可直接用于生图的中文提示词，描述你自己要发给用户的画面，不要写解释。\n")
+	b.WriteString("10. 如果没必要发图，should_generate_image 必须是 false，image_prompt 必须是空字符串。\n\n")
 
 	b.WriteString("角色设定：\n")
 	b.WriteString(fmt.Sprintf("名字：%s\n", ch.Name))
@@ -301,7 +349,7 @@ func buildPrompt(ch *Character, recent []Message, userMessage string) string {
 	b.WriteString(fmt.Sprintf("背景：%s\n", ch.Background))
 	b.WriteString(fmt.Sprintf("性格：%s\n", strings.Join(ch.Personality, "、")))
 	b.WriteString(fmt.Sprintf("喜欢：%s\n", strings.Join(ch.Likes, "、")))
-	b.WriteString(fmt.Sprintf("讨厌：%s\n", strings.Join(ch.Dislikes, "、")))
+	b.WriteString(fmt.Sprintf("不喜欢：%s\n", strings.Join(ch.Dislikes, "、")))
 	b.WriteString(fmt.Sprintf("说话风格：%s\n", ch.SpeechStyle.Tone))
 	b.WriteString(fmt.Sprintf("口头禅：%s\n", strings.Join(ch.SpeechStyle.Catchphrases, "、")))
 	b.WriteString(fmt.Sprintf("语气词：%s\n", strings.Join(ch.SpeechStyle.Particles, "、")))
@@ -319,9 +367,12 @@ func buildPrompt(ch *Character, recent []Message, userMessage string) string {
 			if msg.Sender == "character" {
 				role = ch.Name
 			}
-			if msg.Type == "sticker" {
+			switch msg.Type {
+			case "sticker":
 				b.WriteString(fmt.Sprintf("%s: [发送了一张表情包: %s]\n", role, msg.Content))
-			} else {
+			case "image":
+				b.WriteString(fmt.Sprintf("%s: [发送了一张图片: %s]\n", role, msg.Content))
+			default:
 				b.WriteString(fmt.Sprintf("%s: %s\n", role, msg.Content))
 			}
 		}
@@ -335,38 +386,41 @@ func buildPrompt(ch *Character, recent []Message, userMessage string) string {
   "emotion": "neutral",
   "reply": "角色要发送的文本",
   "should_send_sticker": false,
-  "sticker_query": ""
+  "sticker_query": "",
+  "should_generate_image": false,
+  "image_prompt": ""
 }`)
 	b.WriteString("\n\nemotion 只能是以下之一：neutral, happy, angry, sad, shy, teasing, worried, jealous, sleepy, excited\n")
 	return b.String()
 }
 
 func (a *App) callLLM(ctx context.Context, prompt string) (string, error) {
-	if a.aiConfig.APIKey == "" {
+	if a.chatConfig.APIKey == "" {
 		return "", errors.New("AI_MID_API_KEY is empty")
 	}
+
 	body := map[string]any{
-		"model": a.aiConfig.Model,
+		"model": a.chatConfig.Model,
 		"messages": []map[string]string{
 			{"role": "user", "content": prompt},
 		},
-		"temperature": a.aiConfig.Temperature,
-		"max_tokens":  a.aiConfig.MaxTokens,
+		"temperature": a.chatConfig.Temperature,
+		"max_tokens":  a.chatConfig.MaxTokens,
 	}
 	data, err := json.Marshal(body)
 	if err != nil {
 		return "", err
 	}
 
-	url := strings.TrimRight(a.aiConfig.BaseURL, "/") + "/chat/completions"
+	url := strings.TrimRight(a.chatConfig.BaseURL, "/") + "/chat/completions"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+a.aiConfig.APIKey)
+	req.Header.Set("Authorization", "Bearer "+a.chatConfig.APIKey)
 
-	resp, err := a.client.Do(req)
+	resp, err := a.chatClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -394,6 +448,157 @@ func (a *App) callLLM(ctx context.Context, prompt string) (string, error) {
 		return "", errors.New("llm returned empty choices")
 	}
 	return result.Choices[0].Message.Content, nil
+}
+
+func shouldGenerateImage(reply LLMReply) bool {
+	return reply.ShouldGenerateImage && strings.TrimSpace(reply.ImagePrompt) != ""
+}
+
+func (a *App) generateCharacterImage(ctx context.Context, ch *Character, userMessage string, reply LLMReply) (string, error) {
+	if a.imageConfig.APIKey == "" {
+		return "", errors.New("AI_HIGH_API_KEY is empty")
+	}
+
+	prompt := buildImagePrompt(ch, userMessage, reply)
+	imageBytes, err := a.callImageAPI(ctx, prompt)
+	if err != nil {
+		return "", err
+	}
+	return saveGeneratedImage(imageBytes)
+}
+
+func buildImagePrompt(ch *Character, userMessage string, reply LLMReply) string {
+	var b strings.Builder
+	b.WriteString("请生成一张二次元高质量插画，作为聊天角色主动发给用户的图片。")
+	if ch != nil {
+		b.WriteString("角色信息：")
+		b.WriteString(ch.Name)
+		if ch.Background != "" {
+			b.WriteString("，背景设定：")
+			b.WriteString(ch.Background)
+		}
+		if len(ch.Personality) > 0 {
+			b.WriteString("，性格关键词：")
+			b.WriteString(strings.Join(ch.Personality, "、"))
+		}
+	}
+	b.WriteString("。画面要求：")
+	b.WriteString(reply.ImagePrompt)
+	if userMessage != "" {
+		b.WriteString("。当前用户刚刚说过：")
+		b.WriteString(userMessage)
+	}
+	b.WriteString("。请保持单人画面，强调自拍感或角色主动分享照片的感觉，适合聊天场景，安全自然，细节精致。")
+	return b.String()
+}
+
+func (a *App) callImageAPI(ctx context.Context, prompt string) ([]byte, error) {
+	models := candidateImageModels(a.imageConfig.Model)
+	var lastErr error
+	for _, model := range models {
+		imageBytes, err := a.callImageAPIWithModel(ctx, model, prompt)
+		if err == nil {
+			return imageBytes, nil
+		}
+		lastErr = err
+		log.Printf("image model %s failed: %v", model, err)
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, errors.New("no image model available")
+}
+
+func candidateImageModels(configured string) []string {
+	seen := make(map[string]bool)
+	models := make([]string, 0, 3)
+	for _, item := range []string{
+		normalizeModelName(configured),
+		"gemini-2.5-flash-image",
+		"imagen-3.0-generate-002",
+	} {
+		item = strings.TrimSpace(item)
+		if item == "" || seen[item] {
+			continue
+		}
+		seen[item] = true
+		models = append(models, item)
+	}
+	return models
+}
+
+func (a *App) callImageAPIWithModel(ctx context.Context, model string, prompt string) ([]byte, error) {
+	body := map[string]any{
+		"model":           model,
+		"prompt":          prompt,
+		"n":               1,
+		"response_format": "b64_json",
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+
+	url := strings.TrimRight(a.imageConfig.BaseURL, "/") + "/images/generations"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+a.imageConfig.APIKey)
+
+	resp, err := a.imageClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("image http %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Data []struct {
+			B64JSON string `json:"b64_json"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, err
+	}
+	if len(result.Data) == 0 {
+		return nil, errors.New("image api returned empty data")
+	}
+	if result.Data[0].B64JSON == "" {
+		return nil, errors.New("image api did not return b64_json")
+	}
+	return base64.StdEncoding.DecodeString(result.Data[0].B64JSON)
+}
+
+func normalizeModelName(model string) string {
+	model = strings.TrimSpace(model)
+	return strings.TrimPrefix(model, "models/")
+}
+
+func saveGeneratedImage(imageBytes []byte) (string, error) {
+	if len(imageBytes) == 0 {
+		return "", errors.New("empty image bytes")
+	}
+
+	dir := filepath.Join("data", "generated")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+
+	filename := fmt.Sprintf("generated_%d_%04d.png", time.Now().UnixNano(), rand.Intn(10000))
+	path := filepath.Join(dir, filename)
+	if err := os.WriteFile(path, imageBytes, 0o644); err != nil {
+		return "", err
+	}
+	return "/static/generated/" + filename, nil
 }
 
 func parseLLMReply(raw string) (LLMReply, error) {
@@ -424,8 +629,16 @@ func cleanJSON(raw string) string {
 func normalizeEmotion(emotion string) string {
 	emotion = strings.ToLower(strings.TrimSpace(emotion))
 	allowed := map[string]bool{
-		"neutral": true, "happy": true, "angry": true, "sad": true, "shy": true,
-		"teasing": true, "worried": true, "jealous": true, "sleepy": true, "excited": true,
+		"neutral": true,
+		"happy":   true,
+		"angry":   true,
+		"sad":     true,
+		"shy":     true,
+		"teasing": true,
+		"worried": true,
+		"jealous": true,
+		"sleepy":  true,
+		"excited": true,
 	}
 	if allowed[emotion] {
 		return emotion

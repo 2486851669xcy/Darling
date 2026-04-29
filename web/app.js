@@ -80,11 +80,11 @@ function createBubble(message) {
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
 
-  if (message.type === 'sticker') {
+  if (message.type === 'sticker' || message.type === 'image') {
     const img = document.createElement('img');
     img.src = message.content;
-    img.alt = 'sticker';
-    img.className = 'sticker';
+    img.alt = message.type === 'sticker' ? 'sticker' : 'generated image';
+    img.className = message.type === 'sticker' ? 'sticker' : 'generated-image';
     bubble.appendChild(img);
   } else {
     bubble.textContent = message.content;
