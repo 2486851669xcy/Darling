@@ -106,7 +106,8 @@ body {
 }
 
 .conversation-list,
-.settings-list {
+.settings-list,
+.wechat-list {
   background: #fff;
 }
 
@@ -175,7 +176,7 @@ body {
 }
 
 .section-title {
-  padding: 12px 16px 7px;
+  padding: 10px 16px 6px;
   color: var(--subtext);
   font-size: 12px;
 }
@@ -186,37 +187,136 @@ body {
   gap: 4px;
 }
 
+.wechat-list {
+  margin-top: 8px;
+}
+
+.contact-actions {
+  margin-top: 0;
+}
+
+.wechat-row {
+  width: 100%;
+  min-height: 52px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: #fff;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  color: var(--text);
+  text-align: left;
+  font-size: 15px;
+  cursor: pointer;
+  position: relative;
+}
+
+.wechat-row::after,
+.profile-card::after {
+  content: "›";
+  color: #c3c7ce;
+  font-size: 22px;
+  margin-left: auto;
+}
+
+.wechat-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.wechat-icon.green {
+  background: #14b85a;
+}
+
+.wechat-icon.orange {
+  background: #f59e0b;
+}
+
+.wechat-icon.blue {
+  background: #3b82f6;
+}
+
+.wechat-icon.yellow {
+  background: #eab308;
+}
+
+.wechat-icon.gray {
+  background: #7b818c;
+}
+
+.wechat-label {
+  flex: 1;
+}
+
+.muted-row {
+  opacity: 0.68;
+}
+
+.placeholder-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-weight: 700;
+  background: #94a3b8;
+}
+
 .moments-view {
   background: #fff;
 }
 
 .moments-cover {
-  height: 150px;
+  height: 235px;
   display: flex;
   align-items: flex-end;
   justify-content: flex-end;
-  padding: 18px;
+  padding: 0 16px 18px;
   color: #fff;
   text-align: right;
-  background: linear-gradient(135deg, #6b7280, #1f2937);
+  background:
+    linear-gradient(rgba(15, 23, 42, 0.12), rgba(15, 23, 42, 0.38)),
+    linear-gradient(135deg, #8a9099, #334155);
+  position: relative;
+}
+
+.moments-cover-copy {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  transform: translateY(42px);
 }
 
 .moments-title {
-  font-size: 20px;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+  font-size: 18px;
   font-weight: 700;
 }
 
-.moments-subtitle {
-  margin-top: 5px;
-  font-size: 12px;
-  opacity: 0.82;
+.moments-self-avatar {
+  width: 72px;
+  height: 72px;
+  border: 3px solid #fff;
+  border-radius: 10px;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.2);
 }
 
 .moment-card {
   display: flex;
   gap: 10px;
-  padding: 14px 16px;
+  padding: 16px;
   border-bottom: 1px solid var(--line);
+}
+
+.moments-cover + .moment-card {
+  padding-top: 56px;
 }
 
 .moment-avatar {
@@ -226,8 +326,19 @@ body {
   flex: 0 0 38px;
 }
 
+.moments-self-avatar {
+  width: 72px;
+  height: 72px;
+  flex: 0 0 72px;
+}
+
+.moment-body {
+  flex: 1;
+  min-width: 0;
+}
+
 .moment-name {
-  color: #334155;
+  color: #576b95;
   font-size: 14px;
   font-weight: 700;
 }
@@ -239,16 +350,54 @@ body {
   font-size: 14px;
 }
 
+.moment-photo-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 74px);
+  gap: 5px;
+  margin: 8px 0;
+}
+
+.moment-photo-grid div {
+  width: 74px;
+  height: 74px;
+  background: linear-gradient(135deg, #d1d5db, #94a3b8);
+}
+
+.moment-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--subtext);
+  font-size: 12px;
+}
+
+.moment-actions button {
+  border: 0;
+  border-radius: 3px;
+  background: #f1f5f9;
+  color: #576b95;
+  padding: 0 7px 2px;
+  font-size: 16px;
+  line-height: 1;
+}
+
 .profile-view {
-  padding-top: 14px;
+  background: #ededed;
+  padding-top: 10px;
 }
 
 .profile-card {
   display: flex;
   align-items: center;
   gap: 14px;
-  padding: 18px 16px;
+  padding: 22px 16px;
   background: #fff;
+  position: relative;
+}
+
+.profile-main {
+  flex: 1;
+  min-width: 0;
 }
 
 .profile-avatar {
@@ -262,19 +411,21 @@ body {
   font-weight: 700;
 }
 
+.profile-id {
+  margin-top: 7px;
+}
+
+.profile-qr {
+  color: #9ca3af;
+  font-size: 20px;
+}
+
 .settings-list {
-  margin-top: 12px;
+  margin-top: 8px;
 }
 
 .settings-list button {
-  width: 100%;
-  border: 0;
-  border-bottom: 1px solid var(--line);
-  background: #fff;
-  padding: 15px 16px;
-  color: var(--text);
-  text-align: left;
-  font-size: 14px;
+  font-size: 15px;
 }
 
 .chat-view {

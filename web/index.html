@@ -32,7 +32,21 @@
         </main>
 
         <main id="contactsView" class="app-view">
-          <section class="section-title">联系人</section>
+          <section class="wechat-list contact-actions">
+            <button class="wechat-row" type="button">
+              <span class="wechat-icon orange">＋</span>
+              <span class="wechat-label">新的朋友</span>
+            </button>
+            <button class="wechat-row" type="button">
+              <span class="wechat-icon green">群</span>
+              <span class="wechat-label">群聊</span>
+            </button>
+            <button class="wechat-row" type="button">
+              <span class="wechat-icon blue">签</span>
+              <span class="wechat-label">标签</span>
+            </button>
+          </section>
+          <section class="section-title">星标朋友</section>
           <button id="maiContact" class="contact-row" type="button">
             <img class="contact-avatar" alt="樱岛麻衣头像" />
             <span>
@@ -40,29 +54,48 @@
               <span class="contact-note">恋人</span>
             </span>
           </button>
+          <section class="section-title">M</section>
+          <button class="contact-row muted-row" type="button">
+            <span class="contact-avatar placeholder-avatar">M</span>
+            <span>
+              <span class="contact-name">Mai Sakurajima</span>
+              <span class="contact-note">同一位联系人</span>
+            </span>
+          </button>
         </main>
 
         <main id="momentsView" class="app-view moments-view">
           <section class="moments-cover">
-            <div>
-              <div class="moments-title">朋友圈</div>
-              <div class="moments-subtitle">今天也认真生活</div>
+            <div class="moments-cover-copy">
+              <div class="moments-title">我</div>
+              <img class="moment-avatar moments-self-avatar" alt="我的头像" />
             </div>
           </section>
           <article class="moment-card">
             <img class="moment-avatar" alt="樱岛麻衣头像" />
             <div class="moment-body">
               <div class="moment-name">樱岛麻衣</div>
-              <p>拍摄结束。回去之前买点食材，今晚大概会做得清淡一点。</p>
-              <div class="moment-meta">刚刚</div>
+              <p>拍摄结束。回去之前买点食材，今晚大概会做得清淡一点</p>
+              <div class="moment-photo-grid">
+                <div></div>
+                <div></div>
+                <div></div>
+              </div>
+              <div class="moment-actions">
+                <span>刚刚</span>
+                <button type="button">··</button>
+              </div>
             </div>
           </article>
           <article class="moment-card">
             <img class="moment-avatar" alt="樱岛麻衣头像" />
             <div class="moment-body">
               <div class="moment-name">樱岛麻衣</div>
-              <p>天气不错。偶尔安静一点，也不坏。</p>
-              <div class="moment-meta">昨天 21:14</div>
+              <p>天气不错。偶尔安静一点，也不坏</p>
+              <div class="moment-actions">
+                <span>昨天 21:14</span>
+                <button type="button">··</button>
+              </div>
             </div>
           </article>
         </main>
@@ -70,16 +103,37 @@
         <main id="profileView" class="app-view profile-view">
           <section class="profile-card">
             <img class="profile-avatar" alt="我的头像" />
-            <div>
+            <div class="profile-main">
               <div class="profile-name">我</div>
-              <div class="profile-id">Dimension ID: local-user</div>
+              <div class="profile-id">微信号：local-user</div>
             </div>
+            <span class="profile-qr">▣</span>
           </section>
-          <section class="settings-list">
-            <button type="button">收藏</button>
-            <button type="button">相册</button>
-            <button type="button">表情</button>
-            <button type="button">设置</button>
+          <section class="settings-list wechat-list">
+            <button class="wechat-row" type="button">
+              <span class="wechat-icon green">服</span>
+              <span class="wechat-label">服务</span>
+            </button>
+          </section>
+          <section class="settings-list wechat-list">
+            <button class="wechat-row" type="button">
+              <span class="wechat-icon yellow">★</span>
+              <span class="wechat-label">收藏</span>
+            </button>
+            <button class="wechat-row" type="button">
+              <span class="wechat-icon blue">图</span>
+              <span class="wechat-label">朋友圈</span>
+            </button>
+            <button class="wechat-row" type="button">
+              <span class="wechat-icon orange">表</span>
+              <span class="wechat-label">表情</span>
+            </button>
+          </section>
+          <section class="settings-list wechat-list">
+            <button class="wechat-row" type="button">
+              <span class="wechat-icon gray">⚙</span>
+              <span class="wechat-label">设置</span>
+            </button>
           </section>
         </main>
 

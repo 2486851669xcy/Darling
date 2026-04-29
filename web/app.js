@@ -528,11 +528,13 @@ function applyCharacterUI(character) {
   typingIndicator.textContent = `${character.name} 正在输入...`;
   messageInput.placeholder = `输入消息，和${character.name}聊聊天...`;
 
-  document.querySelectorAll('.conversation-avatar, .contact-avatar, .moment-avatar').forEach((avatar) => {
+  document.querySelectorAll('.conversation-avatar, .contact-avatar, .moment-card .moment-avatar').forEach((avatar) => {
     avatar.src = character.avatar || 'https://placehold.co/64x64?text=AI';
   });
   const profileAvatar = document.querySelector('.profile-avatar');
   profileAvatar.src = character.user_avatar || 'https://placehold.co/72x72?text=U';
+  const momentsSelfAvatar = document.querySelector('.moments-self-avatar');
+  momentsSelfAvatar.src = character.user_avatar || 'https://placehold.co/72x72?text=U';
   document.querySelector('.conversation-name').textContent = character.name;
   document.querySelector('.contact-name').textContent = character.name;
   document.querySelector('.contact-note').textContent = character.relationship || '联系人';
