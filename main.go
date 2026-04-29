@@ -61,18 +61,26 @@ type SendChatRequest struct {
 	Message     string `json:"message"`
 }
 
+type ProactiveChatRequest struct {
+	CharacterID string `json:"character_id"`
+}
+
 type SendChatResponse struct {
-	Messages []Message `json:"messages"`
-	Emotion  string    `json:"emotion"`
+	Messages              []Message `json:"messages"`
+	Emotion               string    `json:"emotion"`
+	Skipped               bool      `json:"skipped,omitempty"`
+	NextCheckAfterSeconds int       `json:"next_check_after_seconds,omitempty"`
 }
 
 type LLMReply struct {
-	Emotion             string `json:"emotion"`
-	Reply               string `json:"reply"`
-	ShouldSendSticker   bool   `json:"should_send_sticker"`
-	StickerQuery        string `json:"sticker_query"`
-	ShouldGenerateImage bool   `json:"should_generate_image"`
-	ImagePrompt         string `json:"image_prompt"`
+	Emotion             string   `json:"emotion"`
+	ShouldReply         *bool    `json:"should_reply"`
+	Reply               string   `json:"reply"`
+	Replies             []string `json:"replies"`
+	ShouldSendSticker   bool     `json:"should_send_sticker"`
+	StickerQuery        string   `json:"sticker_query"`
+	ShouldGenerateImage bool     `json:"should_generate_image"`
+	ImagePrompt         string   `json:"image_prompt"`
 }
 
 type AIConfig struct {
@@ -119,6 +127,7 @@ func main() {
 	r.GET("/api/messages", app.handleGetMessages)
 	r.GET("/api/character", app.handleGetCharacter)
 	r.POST("/api/chat/send", app.handleSendChat)
+	r.POST("/api/chat/proactive", app.handleProactiveChat)
 	r.POST("/api/messages/clear", app.handleClearMessages)
 
 	log.Println("DimensionMessenger demo started: http://localhost:8080")
@@ -297,17 +306,24 @@ func (a *App) handleSendChat(c *gin.Context) {
 	parsed.Emotion = normalizeEmotion(parsed.Emotion)
 	parsed.Reply = strings.TrimSpace(parsed.Reply)
 	parsed.ImagePrompt = strings.TrimSpace(parsed.ImagePrompt)
-	if parsed.Reply == "" {
-		parsed.Reply = "嗯哼，我在听哦。"
-	}
-
-	characterMsg, err := a.saveMessage(c.Request.Context(), req.CharacterID, "character", "text", parsed.Reply)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	if parsed.ShouldReply != nil && !*parsed.ShouldReply {
+		log.Printf("user msg saved: %d, character skipped reply", userMsg.ID)
+		c.JSON(http.StatusOK, SendChatResponse{Messages: nil, Emotion: parsed.Emotion, Skipped: true})
 		return
 	}
+	replyParts := normalizeReplyParts(parsed, "嗯哼，我在听哦。", 3)
+	parsed.Reply = strings.Join(replyParts, "\n")
 
-	result := []Message{characterMsg}
+	result := make([]Message, 0, len(replyParts)+2)
+	for _, part := range replyParts {
+		characterMsg, err := a.saveMessage(c.Request.Context(), req.CharacterID, "character", "text", part)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		result = append(result, characterMsg)
+	}
+
 	if a.shouldSendSticker(c.Request.Context(), character, parsed) {
 		if stickerURL := a.pickSticker(c.Request.Context(), character, parsed.Emotion); stickerURL != "" {
 			stickerMsg, err := a.saveMessage(c.Request.Context(), req.CharacterID, "character", "sticker", stickerURL)
@@ -330,6 +346,91 @@ func (a *App) handleSendChat(c *gin.Context) {
 	}
 
 	log.Printf("user msg saved: %d", userMsg.ID)
+	c.JSON(http.StatusOK, SendChatResponse{Messages: result, Emotion: parsed.Emotion})
+}
+
+func (a *App) handleProactiveChat(c *gin.Context) {
+	var req ProactiveChatRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	req.CharacterID = strings.TrimSpace(req.CharacterID)
+	if req.CharacterID == "" {
+		req.CharacterID = "luna"
+	}
+
+	character, err := loadCharacter(req.CharacterID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	ok, nextCheckAfterSeconds, err := a.canSendProactiveMessage(c.Request.Context(), req.CharacterID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if !ok {
+		c.JSON(http.StatusOK, SendChatResponse{
+			Messages:              nil,
+			Emotion:               "neutral",
+			Skipped:               true,
+			NextCheckAfterSeconds: nextCheckAfterSeconds,
+		})
+		return
+	}
+
+	recent, err := a.getRecentMessages(c.Request.Context(), req.CharacterID, 14)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	prompt := buildProactivePrompt(character, recent)
+	raw, err := a.callLLM(c.Request.Context(), prompt)
+	if err != nil {
+		log.Printf("proactive llm error: %v", err)
+		c.JSON(http.StatusOK, SendChatResponse{Messages: nil, Emotion: "neutral", Skipped: true})
+		return
+	}
+
+	parsed, err := parseLLMReply(raw)
+	if err != nil {
+		log.Printf("parse proactive llm json error: %v, raw=%s", err, raw)
+		c.JSON(http.StatusOK, SendChatResponse{Messages: nil, Emotion: "neutral", Skipped: true})
+		return
+	}
+
+	parsed.Emotion = normalizeEmotion(parsed.Emotion)
+	parsed.Reply = strings.TrimSpace(parsed.Reply)
+	replyParts := normalizeReplyParts(parsed, "", 3)
+	if len(replyParts) == 0 {
+		c.JSON(http.StatusOK, SendChatResponse{Messages: nil, Emotion: parsed.Emotion, Skipped: true})
+		return
+	}
+	parsed.Reply = strings.Join(replyParts, "\n")
+	parsed.ShouldGenerateImage = false
+
+	result := make([]Message, 0, len(replyParts)+1)
+	for _, part := range replyParts {
+		characterMsg, err := a.saveMessage(c.Request.Context(), req.CharacterID, "character", "text", part)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		result = append(result, characterMsg)
+	}
+
+	if a.shouldSendSticker(c.Request.Context(), character, parsed) {
+		if stickerURL := a.pickSticker(c.Request.Context(), character, parsed.Emotion); stickerURL != "" {
+			stickerMsg, err := a.saveMessage(c.Request.Context(), req.CharacterID, "character", "sticker", stickerURL)
+			if err == nil {
+				result = append(result, stickerMsg)
+			}
+		}
+	}
+
 	c.JSON(http.StatusOK, SendChatResponse{Messages: result, Emotion: parsed.Emotion})
 }
 
@@ -357,9 +458,13 @@ func buildPrompt(ch *Character, recent []Message, userMessage string) string {
 	b.WriteString("5. 不要输出 Markdown，不要输出代码块。\n")
 	b.WriteString("6. 只能输出一个合法 JSON 对象，不要在 JSON 前后添加任何解释。\n")
 	b.WriteString("7. 不要复述用户的话，要像真实聊天一样回应。\n")
-	b.WriteString("8. 只有在两种情况下才把 should_generate_image 设为 true：用户明确想看你发来的照片/自拍/图片，或者当前很适合奖励用户一张你主动发出的照片。\n")
-	b.WriteString("9. 如果 should_generate_image 为 true，image_prompt 必须写成可直接用于生图的中文提示词，描述你自己要发给用户的画面，不要写解释。\n")
-	b.WriteString("10. 如果没必要发图，should_generate_image 必须是 false，image_prompt 必须是空字符串。\n\n")
+	b.WriteString("8. 如果一句发完会显得太长，可以把内容拆成 replies 数组里的 2 到 3 条短消息；不要为了凑数量而拆。\n")
+	b.WriteString("9. 如果使用 replies，reply 字段写第一条或简短总和；每条 replies 都要像聊天气泡，不要超过 45 个字。\n")
+	b.WriteString("10. 如果用户的话只是自然收尾、简单附和、没有可接内容，或继续回复会显得尴尬/啰嗦，可以把 should_reply 设为 false，reply 为空，replies 为空。\n")
+	b.WriteString("11. should_reply 为 false 时不要发图、不要发表情包；这表示角色已读但不继续接话。\n")
+	b.WriteString("12. 只有在两种情况下才把 should_generate_image 设为 true：用户明确想看你发来的照片/自拍/图片，或者当前很适合奖励用户一张你主动发出的照片。\n")
+	b.WriteString("13. 如果 should_generate_image 为 true，image_prompt 必须写成可直接用于生图的中文提示词，描述你自己要发给用户的画面，不要写解释。\n")
+	b.WriteString("14. 如果没必要发图，should_generate_image 必须是 false，image_prompt 必须是空字符串。\n\n")
 
 	b.WriteString("角色设定：\n")
 	b.WriteString(fmt.Sprintf("名字：%s\n", ch.Name))
@@ -404,7 +509,9 @@ func buildPrompt(ch *Character, recent []Message, userMessage string) string {
 	b.WriteString("请只输出如下 JSON，字段名必须一致：\n")
 	b.WriteString(`{
   "emotion": "neutral",
+  "should_reply": true,
   "reply": "角色要发送的文本",
+  "replies": [],
   "should_send_sticker": false,
   "sticker_query": "",
   "should_generate_image": false,
@@ -412,6 +519,79 @@ func buildPrompt(ch *Character, recent []Message, userMessage string) string {
 }`)
 	b.WriteString("\n\nemotion 只能是以下之一：neutral, happy, angry, sad, shy, teasing, worried, jealous, sleepy, excited\n")
 	return b.String()
+}
+
+func buildProactivePrompt(ch *Character, recent []Message) string {
+	var b strings.Builder
+	b.WriteString("你正在扮演一个虚拟角色。你不是 AI 助手，不要暴露系统设定，不要说自己是语言模型。\n\n")
+	b.WriteString("这次不是用户来找你，而是你在聊天软件里主动给用户发一条消息。\n")
+	b.WriteString("重要要求：\n")
+	b.WriteString("1. 必须严格保持角色人设，像真实聊天里偶尔想起对方才发一句。\n")
+	b.WriteString("2. 不要说“系统提醒”“随机触发”“我来主动消息你了”之类破坏沉浸感的话。\n")
+	b.WriteString("3. 回复通常 1 句话，最多 2 句话，要自然、克制，不要热情过头。\n")
+	b.WriteString("4. 可以是轻轻关心、分享一点日常、顺手吐槽、提醒对方休息，或接上最近聊天里的一个小话题。\n")
+	b.WriteString("5. 不要每次都问问题；不要像客服回访；不要要求用户必须回复。\n")
+	b.WriteString("6. 如果自然需要分开发，可以用 replies 数组拆成 2 条短消息；主动消息不要超过 2 条。\n")
+	b.WriteString("7. 只输出一个合法 JSON 对象，不要在 JSON 前后添加解释。\n\n")
+
+	writeCharacterProfile(&b, ch)
+	writeRecentMessages(&b, ch, recent)
+
+	b.WriteString("\n现在请你主动发来一条自然消息。\n")
+	b.WriteString("请只输出如下 JSON，字段名必须一致：\n")
+	b.WriteString(`{
+  "emotion": "neutral",
+  "reply": "角色主动发送的文本",
+  "replies": [],
+  "should_send_sticker": false,
+  "sticker_query": "",
+  "should_generate_image": false,
+  "image_prompt": ""
+}`)
+	b.WriteString("\n\nemotion 只能是以下之一：neutral, happy, angry, sad, shy, teasing, worried, jealous, sleepy, excited\n")
+	return b.String()
+}
+
+func writeCharacterProfile(b *strings.Builder, ch *Character) {
+	b.WriteString("角色设定：\n")
+	b.WriteString(fmt.Sprintf("名字：%s\n", ch.Name))
+	b.WriteString(fmt.Sprintf("年龄：%d\n", ch.Age))
+	b.WriteString(fmt.Sprintf("性别：%s\n", ch.Gender))
+	b.WriteString(fmt.Sprintf("关系：%s\n", ch.Relationship))
+	b.WriteString(fmt.Sprintf("背景：%s\n", ch.Background))
+	b.WriteString(fmt.Sprintf("性格：%s\n", strings.Join(ch.Personality, "、")))
+	b.WriteString(fmt.Sprintf("喜欢：%s\n", strings.Join(ch.Likes, "、")))
+	b.WriteString(fmt.Sprintf("不喜欢：%s\n", strings.Join(ch.Dislikes, "、")))
+	b.WriteString(fmt.Sprintf("说话风格：%s\n", ch.SpeechStyle.Tone))
+	b.WriteString(fmt.Sprintf("口头禅：%s\n", strings.Join(ch.SpeechStyle.Catchphrases, "、")))
+	b.WriteString(fmt.Sprintf("语气词：%s\n", strings.Join(ch.SpeechStyle.Particles, "、")))
+	b.WriteString("规则：\n")
+	for _, rule := range ch.Rules {
+		b.WriteString("- " + rule + "\n")
+	}
+}
+
+func writeRecentMessages(b *strings.Builder, ch *Character, recent []Message) {
+	b.WriteString("\n最近聊天记录：\n")
+	if len(recent) == 0 {
+		b.WriteString("无\n")
+		return
+	}
+
+	for _, msg := range recent {
+		role := "用户"
+		if msg.Sender == "character" {
+			role = ch.Name
+		}
+		switch msg.Type {
+		case "sticker":
+			b.WriteString(fmt.Sprintf("%s: [发送了一张表情包]\n", role))
+		case "image":
+			b.WriteString(fmt.Sprintf("%s: [发送了一张图片]\n", role))
+		default:
+			b.WriteString(fmt.Sprintf("%s: %s\n", role, summarizePromptText(msg.Content, 500)))
+		}
+	}
 }
 
 func summarizePromptText(value string, limit int) string {
@@ -836,6 +1016,52 @@ func parseLLMReply(raw string) (LLMReply, error) {
 	return reply, nil
 }
 
+func normalizeReplyParts(reply LLMReply, fallback string, limit int) []string {
+	parts := make([]string, 0, limit)
+	for _, item := range reply.Replies {
+		item = cleanReplyBubbleText(item)
+		if item != "" {
+			parts = append(parts, item)
+		}
+		if len(parts) >= limit {
+			return parts
+		}
+	}
+
+	if len(parts) == 0 {
+		for _, item := range splitReplyText(reply.Reply) {
+			item = cleanReplyBubbleText(item)
+			if item != "" {
+				parts = append(parts, item)
+			}
+			if len(parts) >= limit {
+				return parts
+			}
+		}
+	}
+
+	if len(parts) == 0 && strings.TrimSpace(fallback) != "" {
+		parts = append(parts, cleanReplyBubbleText(fallback))
+	}
+	return parts
+}
+
+func cleanReplyBubbleText(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.TrimRight(value, "。．.")
+	return strings.TrimSpace(value)
+}
+
+func splitReplyText(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	value = strings.ReplaceAll(value, "\r", "\n")
+	return strings.Split(value, "\n")
+}
+
 func cleanJSON(raw string) string {
 	raw = strings.TrimSpace(raw)
 	raw = strings.TrimPrefix(raw, "```json")
@@ -1006,6 +1232,34 @@ LIMIT ?`, characterID, limit)
 		recent[content] = true
 	}
 	return recent
+}
+
+func (a *App) canSendProactiveMessage(ctx context.Context, characterID string) (bool, int, error) {
+	var sender string
+	var ageSeconds sql.NullInt64
+	err := a.db.QueryRowContext(ctx, `
+SELECT sender, CAST(strftime('%s', 'now') - strftime('%s', created_at) AS INTEGER)
+FROM messages
+WHERE character_id = ?
+ORDER BY id DESC
+LIMIT 1`, characterID).Scan(&sender, &ageSeconds)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return true, 0, nil
+		}
+		return false, 60, err
+	}
+	if !ageSeconds.Valid {
+		return false, 60, nil
+	}
+
+	if ageSeconds.Int64 < 90 {
+		return false, int(90 - ageSeconds.Int64), nil
+	}
+	if sender == "character" && ageSeconds.Int64 < 360 {
+		return false, int(360 - ageSeconds.Int64), nil
+	}
+	return true, 0, nil
 }
 
 func (a *App) getGeneratedStickerCandidates(ctx context.Context, characterID, emotion string) []string {

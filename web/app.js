@@ -16,6 +16,19 @@ const state = {
   },
   audioContext: null,
   audioReady: null,
+  isLoading: false,
+  proactiveTimer: null,
+  proactiveBusy: false,
+};
+
+const proactiveDelayRange = {
+  min: 60 * 1000,
+  max: 180 * 1000,
+};
+
+const firstProactiveDelayRange = {
+  min: 20 * 1000,
+  max: 45 * 1000,
 };
 
 function getAudioContext() {
@@ -105,6 +118,21 @@ async function sendMessage(text) {
   return response.json();
 }
 
+async function requestProactiveMessage() {
+  const response = await fetch('/api/chat/proactive', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ character_id: characterId }),
+  });
+
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || '主动消息获取失败');
+  }
+
+  return response.json();
+}
+
 async function clearMessages() {
   const response = await fetch(`/api/messages/clear?character_id=${characterId}`, {
     method: 'POST',
@@ -187,14 +215,88 @@ function appendMessage(message) {
   scrollToBottom();
 }
 
+function wait(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function messageDelay(message) {
+  if (!message || message.type !== 'text') {
+    return 520;
+  }
+  const length = [...message.content].length;
+  return Math.min(1200, Math.max(520, length * 34));
+}
+
+async function appendMessagesSequentially(messages, { playReceiveSound = false } = {}) {
+  const queue = Array.isArray(messages) ? messages : [];
+  for (let index = 0; index < queue.length; index += 1) {
+    if (index > 0) {
+      typingIndicator.classList.remove('hidden');
+      await wait(messageDelay(queue[index - 1]));
+    }
+    typingIndicator.classList.add('hidden');
+    appendMessage(queue[index]);
+    if (playReceiveSound && index === 0) {
+      playMessageSound('receive');
+    }
+  }
+}
+
 function setLoading(loading) {
+  state.isLoading = loading;
   sendBtn.disabled = loading;
   clearBtn.disabled = loading;
   messageInput.disabled = loading;
   typingIndicator.classList.toggle('hidden', !loading);
 }
 
+function randomDelay({ min, max }) {
+  return Math.floor(min + Math.random() * (max - min));
+}
+
+function scheduleProactiveMessage(delayMs) {
+  window.clearTimeout(state.proactiveTimer);
+  const delay = Number.isFinite(delayMs) ? delayMs : randomDelay(proactiveDelayRange);
+  state.proactiveTimer = window.setTimeout(checkProactiveMessage, delay);
+}
+
+async function checkProactiveMessage() {
+  if (document.hidden || state.isLoading || state.proactiveBusy || messageInput.value.trim()) {
+    scheduleProactiveMessage();
+    return;
+  }
+
+  state.proactiveBusy = true;
+  typingIndicator.classList.remove('hidden');
+
+  try {
+    const result = await requestProactiveMessage();
+    const messages = Array.isArray(result.messages) ? result.messages : [];
+    if (!result.skipped && messages.length > 0) {
+      setLoading(true);
+      await appendMessagesSequentially(messages, { playReceiveSound: true });
+    } else if (result.next_check_after_seconds) {
+      const jitter = randomDelay({ min: 8 * 1000, max: 25 * 1000 });
+      console.info(`主动消息暂不触发，约 ${result.next_check_after_seconds} 秒后重试`);
+      scheduleProactiveMessage((result.next_check_after_seconds * 1000) + jitter);
+      return;
+    }
+  } catch (error) {
+    console.warn(error);
+  } finally {
+    state.proactiveBusy = false;
+    if (state.isLoading) {
+      setLoading(false);
+    } else {
+      typingIndicator.classList.add('hidden');
+    }
+    scheduleProactiveMessage();
+  }
+}
+
 async function handleSend() {
+  if (state.isLoading) return;
+
   const text = messageInput.value.trim();
   if (!text) return;
 
@@ -210,10 +312,9 @@ async function handleSend() {
 
   try {
     const result = await sendMessage(text);
-    result.messages.forEach((message) => appendMessage(message));
-    if (result.messages.length > 0) {
-      playMessageSound('receive');
-    }
+    const messages = Array.isArray(result.messages) ? result.messages : [];
+    await appendMessagesSequentially(messages, { playReceiveSound: messages.length > 0 });
+    scheduleProactiveMessage();
   } catch (error) {
     appendMessage({
       sender: 'character',
@@ -242,6 +343,7 @@ clearBtn.addEventListener('click', async () => {
     setLoading(true);
     await clearMessages();
     renderMessages([]);
+    scheduleProactiveMessage();
   } catch (error) {
     appendMessage({
       sender: 'character',
@@ -267,6 +369,7 @@ function applyCharacterUI(character) {
     const [character, messages] = await Promise.all([fetchCharacter(), fetchMessages()]);
     applyCharacterUI(character);
     renderMessages(messages);
+    scheduleProactiveMessage(randomDelay(firstProactiveDelayRange));
   } catch (error) {
     renderMessages([]);
     appendMessage({
