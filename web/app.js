@@ -4,7 +4,6 @@ const messageList = document.getElementById('messageList');
 const messageInput = document.getElementById('messageInput');
 const sendBtn = document.getElementById('sendBtn');
 const clearBtn = document.getElementById('clearBtn');
-const typingIndicator = document.getElementById('typingIndicator');
 const chatTitle = document.querySelector('.chat-title');
 const chatSubtitle = document.querySelector('.chat-subtitle');
 const backBtn = document.getElementById('backBtn');
@@ -18,6 +17,7 @@ const conversationPreview = document.getElementById('conversationPreview');
 const conversationTime = document.getElementById('conversationTime');
 const momentInput = document.getElementById('momentInput');
 const postMomentBtn = document.getElementById('postMomentBtn');
+const momentStatus = document.getElementById('momentStatus');
 const momentsList = document.getElementById('momentsList');
 const notificationToast = document.getElementById('notificationToast');
 const notificationAvatar = document.getElementById('notificationAvatar');
@@ -46,6 +46,14 @@ const state = {
   toastTimer: null,
   notificationQueue: [],
   toastActive: false,
+  momentStatusTimer: null,
+  pendingUserMessages: [],
+  pendingSendTimer: null,
+  isWaitingForAI: false,
+  unreadBatchDelay: 10 * 1000,
+  lastUserBubble: null,
+  pendingUserRows: [],
+  typingBubble: null,
 };
 
 const proactiveDelayRange = {
@@ -536,6 +544,10 @@ function createBubble(message) {
     row.appendChild(avatar);
     row.appendChild(bubble);
   } else {
+    const status = document.createElement('span');
+    status.className = 'bubble-read-status';
+    status.innerHTML = '<span class="read-check" aria-hidden="true">✓</span>';
+    row.appendChild(status);
     row.appendChild(bubble);
     row.appendChild(avatar);
   }
@@ -543,10 +555,50 @@ function createBubble(message) {
   return row;
 }
 
+function createTypingBubble() {
+  const row = document.createElement('div');
+  row.className = 'message-row character typing-row';
+
+  const avatar = document.createElement('img');
+  avatar.className = 'avatar';
+  avatar.src = getAvatarUrl('character');
+  avatar.alt = `${state.character.name || '角色'}头像`;
+
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble typing-bubble';
+  bubble.innerHTML = '<span></span><span></span><span></span>';
+
+  row.appendChild(avatar);
+  row.appendChild(bubble);
+  return row;
+}
+
+function showTypingBubble() {
+  if (state.typingBubble) return;
+  const empty = messageList.querySelector('.empty-state');
+  if (empty) {
+    empty.remove();
+  }
+  state.typingBubble = createTypingBubble();
+  messageList.appendChild(state.typingBubble);
+  scrollToBottom();
+}
+
+function hideTypingBubble() {
+  state.typingBubble?.remove();
+  state.typingBubble = null;
+}
+
+function hasLaterCharacterMessage(messages, index) {
+  return messages.slice(index + 1).some((message) => message.sender === 'character');
+}
+
 function renderMessages(messages) {
   messageList.innerHTML = '';
   state.messages = Array.isArray(messages) ? messages : [];
   state.lastVisibleMessageTime = null;
+  state.lastUserBubble = null;
+  state.pendingUserRows = [];
 
   if (!state.messages.length) {
     const empty = document.createElement('div');
@@ -557,11 +609,18 @@ function renderMessages(messages) {
     return;
   }
 
-  state.messages.forEach((message) => {
+  state.messages.forEach((message, index) => {
     if (shouldShowTimeSeparator(message)) {
       messageList.appendChild(createTimeSeparator(message));
     }
-    messageList.appendChild(createBubble(message));
+    const row = createBubble(message);
+    if (message.sender === 'user' && hasLaterCharacterMessage(state.messages, index)) {
+      row.querySelector('.bubble-read-status')?.classList.add('read');
+    }
+    messageList.appendChild(row);
+    if (message.sender === 'user') {
+      state.lastUserBubble = row;
+    }
   });
   updateConversationSummary();
   scrollToBottom();
@@ -577,7 +636,12 @@ function appendMessage(message) {
   if (shouldShowTimeSeparator(message)) {
     messageList.appendChild(createTimeSeparator(message));
   }
-  messageList.appendChild(createBubble(message));
+  const row = createBubble(message);
+  messageList.appendChild(row);
+  if (message.sender === 'user') {
+    state.lastUserBubble = row;
+    state.pendingUserRows.push(row);
+  }
   scrollToBottom();
 }
 
@@ -585,22 +649,49 @@ function wait(ms) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+function randomBetween(min, max) {
+  return Math.floor(min + Math.random() * (max - min + 1));
+}
+
+function markPendingUserMessagesRead() {
+  state.pendingUserRows.forEach((row) => {
+    row.querySelector('.bubble-read-status')?.classList.add('read');
+  });
+  state.pendingUserRows = [];
+}
+
+function clearInlineReadStatus() {
+  document.querySelectorAll('.bubble-read-status').forEach((status) => {
+    status.classList.remove('read');
+  });
+}
+
+function showMomentStatus(text, duration = 2200) {
+  window.clearTimeout(state.momentStatusTimer);
+  momentStatus.textContent = text;
+  momentStatus.classList.remove('hidden');
+  state.momentStatusTimer = window.setTimeout(hideMomentStatus, duration);
+}
+
+function hideMomentStatus() {
+  window.clearTimeout(state.momentStatusTimer);
+  momentStatus.classList.add('hidden');
+}
+
 function messageDelay(message) {
   if (!message || message.type !== 'text') {
-    return 520;
+    return randomBetween(350, 800);
   }
   const length = [...message.content].length;
-  return Math.min(1200, Math.max(520, length * 34));
+  return Math.min(1500, Math.max(700, length * 34));
 }
 
 async function appendMessagesSequentially(messages, { playReceiveSound = false } = {}) {
   const queue = Array.isArray(messages) ? messages : [];
   for (let index = 0; index < queue.length; index += 1) {
-    if (index > 0) {
-      typingIndicator.classList.remove('hidden');
-      await wait(messageDelay(queue[index - 1]));
-    }
-    typingIndicator.classList.add('hidden');
+    showTypingBubble();
+    await wait(index === 0 ? randomBetween(600, 1200) : messageDelay(queue[index - 1]));
+    hideTypingBubble();
     appendMessage(queue[index]);
     if (playReceiveSound && index === 0) {
       playMessageSound('receive');
@@ -608,12 +699,16 @@ async function appendMessagesSequentially(messages, { playReceiveSound = false }
   }
 }
 
-function setLoading(loading) {
+function setLoading(loading, { showTyping = loading } = {}) {
   state.isLoading = loading;
   sendBtn.disabled = loading;
   clearBtn.disabled = loading;
   messageInput.disabled = loading;
-  typingIndicator.classList.toggle('hidden', !loading);
+  if (showTyping) {
+    showTypingBubble();
+  } else {
+    hideTypingBubble();
+  }
 }
 
 function randomDelay({ min, max }) {
@@ -634,14 +729,67 @@ function scheduleMomentCheck(delayMs) {
   state.momentTimer = window.setTimeout(checkMomentProactive, delay);
 }
 
+function scheduleFlushUserMessages() {
+  window.clearTimeout(state.pendingSendTimer);
+  if (state.pendingUserMessages.length === 0 || state.isWaitingForAI) {
+    return;
+  }
+
+  console.info(`用户消息已缓存 ${state.pendingUserMessages.length} 条，约 ${Math.round(state.unreadBatchDelay / 1000)} 秒后已读`);
+  state.pendingSendTimer = window.setTimeout(flushUserMessages, state.unreadBatchDelay);
+}
+
+async function flushUserMessages() {
+  window.clearTimeout(state.pendingSendTimer);
+  if (state.isWaitingForAI || state.pendingUserMessages.length === 0) {
+    return;
+  }
+
+  const batch = [...state.pendingUserMessages];
+  state.pendingUserMessages = [];
+  state.isWaitingForAI = true;
+  const draftText = messageInput.value;
+  const mergedText = batch.join('\n\n');
+
+  markPendingUserMessagesRead();
+  setLoading(true, { showTyping: false });
+
+  try {
+    await wait(randomBetween(700, 1300));
+    showTypingBubble();
+    const result = await sendMessage(mergedText);
+    const messages = Array.isArray(result.messages) ? result.messages : [];
+    await appendMessagesSequentially(messages, { playReceiveSound: messages.length > 0 });
+    scheduleProactiveMessage();
+  } catch (error) {
+    appendMessage({
+      sender: 'character',
+      type: 'text',
+      content: `出错了：${error.message}`,
+    });
+  } finally {
+    state.isWaitingForAI = false;
+    setLoading(false);
+    hideTypingBubble();
+    if (messageInput.value === '') {
+      messageInput.value = draftText;
+    }
+    messageInput.focus();
+    if (state.pendingUserMessages.length > 0) {
+      scheduleFlushUserMessages();
+    }
+  }
+}
+
 async function checkProactiveMessage() {
   const typedText = messageInput.value.trim();
-  if (document.hidden || state.isLoading || state.proactiveBusy || typedText) {
+  if (document.hidden || state.isLoading || state.proactiveBusy || typedText || state.pendingUserMessages.length > 0) {
     console.info('主动消息检查跳过', {
       hidden: document.hidden,
       loading: state.isLoading,
       busy: state.proactiveBusy,
       typing: Boolean(typedText),
+      pending: state.pendingUserMessages.length,
     });
     scheduleProactiveMessage();
     return;
@@ -649,7 +797,7 @@ async function checkProactiveMessage() {
 
   console.info('主动消息检查开始');
   state.proactiveBusy = true;
-  typingIndicator.classList.remove('hidden');
+  showTypingBubble();
 
   try {
     const result = await requestProactiveMessage();
@@ -686,7 +834,7 @@ async function checkProactiveMessage() {
     if (state.isLoading) {
       setLoading(false);
     } else {
-      typingIndicator.classList.add('hidden');
+      hideTypingBubble();
     }
     scheduleProactiveMessage();
   }
@@ -704,6 +852,9 @@ async function checkMomentProactive() {
 
   console.info('朋友圈 AI 检查开始');
   state.momentBusy = true;
+  if (state.currentView === 'moments') {
+    showMomentStatus(`${state.character.name}刚刚看了你的朋友圈`);
+  }
   try {
     const result = await requestMomentProactive();
     if (!result.skipped) {
@@ -718,6 +869,7 @@ async function checkMomentProactive() {
         console.info('朋友圈 AI 已发动态', result.moment);
       }
       await refreshMoments();
+      hideMomentStatus();
       if (shouldNotify) {
         setUnread('moments', true);
         const openMoments = () => {
@@ -754,14 +906,15 @@ async function checkMomentProactive() {
     }
   } catch (error) {
     console.warn('朋友圈 AI 检查失败', error);
+    hideMomentStatus();
   } finally {
     state.momentBusy = false;
     scheduleMomentCheck();
   }
 }
 
-async function handleSend() {
-  if (state.isLoading) return;
+function handleSend() {
+  if (state.isLoading || state.isWaitingForAI) return;
 
   const text = messageInput.value.trim();
   if (!text) return;
@@ -774,24 +927,9 @@ async function handleSend() {
   };
   appendMessage(optimistic);
   playMessageSound('send');
+  state.pendingUserMessages.push(text);
   messageInput.value = '';
-  setLoading(true);
-
-  try {
-    const result = await sendMessage(text);
-    const messages = Array.isArray(result.messages) ? result.messages : [];
-    await appendMessagesSequentially(messages, { playReceiveSound: messages.length > 0 });
-    scheduleProactiveMessage();
-  } catch (error) {
-    appendMessage({
-      sender: 'character',
-      type: 'text',
-      content: `出错了：${error.message}`,
-    });
-  } finally {
-    setLoading(false);
-    messageInput.focus();
-  }
+  scheduleFlushUserMessages();
 }
 
 sendBtn.addEventListener('click', handleSend);
@@ -841,6 +979,10 @@ clearBtn.addEventListener('click', async () => {
 
   try {
     setLoading(true);
+    window.clearTimeout(state.pendingSendTimer);
+    state.pendingUserMessages = [];
+    state.pendingUserRows = [];
+    clearInlineReadStatus();
     await clearMessages();
     renderMessages([]);
     scheduleProactiveMessage();
@@ -858,7 +1000,6 @@ clearBtn.addEventListener('click', async () => {
 function applyCharacterUI(character) {
   state.character = character;
   document.title = `${character.name} - DimensionMessenger Demo`;
-  typingIndicator.textContent = `${character.name} 正在输入...`;
   messageInput.placeholder = `输入消息，和${character.name}聊聊天...`;
 
   document.querySelectorAll('.conversation-avatar, .contact-avatar, .moment-card .moment-avatar').forEach((avatar) => {
