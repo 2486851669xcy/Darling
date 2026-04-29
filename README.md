@@ -1,92 +1,61 @@
-# DimensionMessenger Demo
+# Darling
 
-一个本地可运行的二次元陪伴聊天 Demo。
+把 AI 角色装进一个像微信一样的 H5 小世界里。
 
-它看起来像一个迷你微信：有消息、联系人、朋友圈、我的。你可以和角色聊天，也可以发朋友圈。她不只是被动回你，偶尔也会主动找你，看到你的朋友圈后也可能评论，甚至自己发一条带图朋友圈。
+Darling 是一个本地可运行的二次元陪伴聊天 Demo：你可以和角色聊天、发朋友圈、等她主动找你、看她点赞评论你的动态，甚至看她自己发朋友圈。它不是一个冷冰冰的问答框，而是一个会“生活”在消息列表和朋友圈里的角色。
 
-默认角色是 **樱岛麻衣** 风格，你也可以把她改成任何你想要的角色。
+默认角色是 **樱岛麻衣** 风格。你也可以把她换成任何你喜欢的角色。
+
+如果你喜欢“AI 角色 + 微信式沉浸界面 + 朋友圈互动”这种方向，欢迎点个 Star，后面会继续把它做得更像真的。
+
+---
+
+## 现在能玩什么
+
+- 像微信一样的 H5 界面：消息、联系人、朋友圈、我的。
+- 角色聊天不是一大段灌水，会拆成多条消息慢慢发。
+- 用户可以连续发多条，AI 会等一会儿再已读并统一理解，少耗 token。
+- AI 可以觉得没必要回复，然后自然结束话题。
+- 她会偶尔主动发消息，不需要永远等你先开口。
+- 有发送/接收提示音、已读小圈圈、居中时间、打字中的 `...` 气泡。
+- 你可以发文字朋友圈。
+- 她会看你的朋友圈，点赞、评论，或者自己发朋友圈。
+- 如果 AI 更新发生在你没打开的页面，会有顶部弹窗和红点提醒。
+- 表情包支持从角色配置读取，也支持自动抓取麻衣相关表情包写进 SQLite。
+- 控制台会打印 token usage，方便你知道钱花在哪。
 
 ---
 
 ## 界面预览
 
-截图只放用户能看到的界面，不需要上传配置文件截图。
+截图放在 `docs/screenshots/`。只需要上传用户能看到的界面截图。
 
-图片放在：
+| 消息 | 聊天 |
+| --- | --- |
+| ![消息主页](docs/screenshots/messages-home.png) | ![聊天详情](docs/screenshots/chat-detail.png) |
 
-```text
-docs/screenshots/
-```
+| 朋友圈 | 通知 |
+| --- | --- |
+| ![朋友圈](docs/screenshots/moments-home.png) | ![顶部提醒和红点](docs/screenshots/notification-toast.png) |
 
-当前 README 会展示这些截图：
+| 联系人 | 我的 |
+| --- | --- |
+| ![联系人](docs/screenshots/contacts-home.png) | ![我的](docs/screenshots/profile-home.png) |
 
-```text
-docs/screenshots/messages-home.png
-docs/screenshots/chat-detail.png
-docs/screenshots/moments-home.png
-docs/screenshots/contacts-home.png
-docs/screenshots/profile-home.png
-docs/screenshots/notification-toast.png
-docs/screenshots/ai-moment.png
-```
-
-### 消息主页
-
-![消息主页](docs/screenshots/messages-home.png)
-
-### 聊天详情
-
-![聊天详情](docs/screenshots/chat-detail.png)
-
-### 朋友圈
-
-![朋友圈](docs/screenshots/moments-home.png)
-
-### 联系人
-
-![联系人](docs/screenshots/contacts-home.png)
-
-### 我的
-
-![我的](docs/screenshots/profile-home.png)
-
-### 顶部提醒和红点
-
-![顶部提醒和红点](docs/screenshots/notification-toast.png)
-
-### AI 朋友圈互动
-
-![AI 朋友圈互动](docs/screenshots/ai-moment.png)
-
----
-
-## 它能怎么玩
-
-你可以把它当成一个本地版“角色微信”。
-
-- 和角色聊天，她会按人设说话，不会像客服。
-- 她可以一条一条连续发消息，而不是每次都吐一大段。
-- 她觉得没什么好回的时候，也可以自然结束，不硬接话。
-- 她会偶尔主动找你，不需要每次都你先开口。
-- 她会发符合情绪的表情包，但不会疯狂刷同一张。
-- 聊天有发送和接收提示音，更像真实聊天。
-- 消息隔了几分钟，会像微信一样显示居中的时间。
-- 你可以发文字朋友圈。
-- 她会隔一段时间看看你的朋友圈，觉得合适就评论。
-- 她也可能自己发朋友圈，而且可以带 AI 生成的图。
-- 你在聊天里问她“我朋友圈刚刚说了什么”，她能参考最近朋友圈正文。
-- 如果你不在聊天页或朋友圈页，AI 更新会弹顶部提示，也会在入口显示红点。
+| AI 朋友圈 |
+| --- |
+| ![AI 朋友圈互动](docs/screenshots/ai-moment.png) |
 
 ---
 
 ## 快速开始
 
-### 1. 准备环境
+### 1. 准备
 
-需要：
+你需要：
 
 - Go 1.22+
-- 一个聊天模型 API Key
+- 一个 OpenAI 兼容格式的聊天模型 API Key
 - 如果想让 AI 发图，再准备一个图片模型 API Key
 
 ### 2. 配置 `.env`
@@ -109,9 +78,9 @@ AI_HIGH_MAX_TOKENS=4096
 AI_HIGH_TIMEOUT=300
 ```
 
-只聊天的话，先配 `AI_MID_*` 就可以。想让 AI 朋友圈带图，再配 `AI_HIGH_*`。
+只聊天的话，先配 `AI_MID_*` 就能跑。想让 AI 朋友圈带图，再配 `AI_HIGH_*`。
 
-不要把真实 API Key 提交到 Git。
+不要把真实 API Key 提交到 GitHub。
 
 ### 3. 启动
 
@@ -119,7 +88,7 @@ AI_HIGH_TIMEOUT=300
 go run .
 ```
 
-浏览器打开：
+打开浏览器：
 
 ```text
 http://localhost:8080
@@ -127,7 +96,7 @@ http://localhost:8080
 
 ---
 
-## 怎么改角色
+## 怎么换成你的角色
 
 角色配置在：
 
@@ -135,32 +104,44 @@ http://localhost:8080
 data/characters/luna.yaml
 ```
 
-常改的地方：
+常改这些就够了：
 
 - `name`：角色名字。
 - `avatar`：角色头像。
 - `user_avatar`：你的头像。
-- `relationship`：你们的关系。
+- `relationship`：你们是什么关系。
 - `background`：角色背景。
 - `personality`：性格关键词。
 - `speech_style`：说话风格。
 - `rules`：角色必须遵守的规则。
-- `stickers`：不同情绪下可发的表情包图片。
+- `stickers`：不同情绪下会发的表情包。
 
 表情包示例：
 
 ```yaml
 stickers:
   happy:
-    - https://your-cdn.com/mai/happy_1.png
-    - https://your-cdn.com/mai/happy_2.png
+    - https://your-cdn.com/character/happy_1.png
+    - https://your-cdn.com/character/happy_2.png
   shy:
-    - https://your-cdn.com/mai/shy_1.png
+    - https://your-cdn.com/character/shy_1.png
   teasing:
-    - https://your-cdn.com/mai/teasing_1.png
+    - https://your-cdn.com/character/teasing_1.png
 ```
 
-建议使用稳定图片直链，不要用容易失效的搜索缩略图。
+建议使用稳定图片直链，不要用容易过期的搜索缩略图。
+
+---
+
+## 省 token 逻辑
+
+Darling 不是每隔几秒就硬调 AI。
+
+- 聊天会先缓存用户连续消息，约 10 秒后一起交给 AI。
+- 朋友圈会先查 SQLite，如果没有新的用户动态信号，就不会调用 AI。
+- 点赞不需要 AI，直接走本地逻辑。
+- 只有需要判断“要不要评论”或“要不要自己发朋友圈”时，才调用模型。
+- 控制台会打印 `prompt_tokens`、`completion_tokens`、`total_tokens`。
 
 ---
 
@@ -168,9 +149,9 @@ stickers:
 
 - 改了 `main.go` 或 `.env` 后，需要重启后端。
 - 改了 `web/app.js`、`web/style.css`、`web/index.html` 后，刷新页面即可。
-- 聊天记录、朋友圈和评论都存在 `dimension.db`。
-- 如果她不知道你朋友圈说了什么，先确认后端已经重启。
+- 聊天记录、朋友圈、评论、点赞、表情包缓存都存在 `dimension.db`。
 - 主动消息和朋友圈检查不是固定时间触发，等一会儿才会出现。
+- 如果你看到 Gin 的 trusted proxies 警告，本地运行可以忽略。
 
 ---
 
@@ -189,12 +170,13 @@ stickers:
 │  └─ style.css
 ├─ main.go
 ├─ go.mod
+├─ LICENSE
 └─ README.md
 ```
 
 ---
 
-## 接下来可以继续加
+## Roadmap
 
 - 朋友圈图片上传。
 - 多角色切换。
@@ -208,4 +190,4 @@ stickers:
 
 ## License
 
-当前仓库未单独声明许可证，如需开源发布，建议补充 `LICENSE` 文件。
+MIT License。你可以自由使用、修改和分享这个项目；如果拿去二创，记得保留许可证声明。

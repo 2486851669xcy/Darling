@@ -864,9 +864,8 @@ async function checkProactiveMessage() {
 }
 
 async function checkMomentProactive() {
-  if (document.hidden || state.momentBusy) {
+  if (state.momentBusy) {
     console.info('朋友圈 AI 检查跳过', {
-      hidden: document.hidden,
       busy: state.momentBusy,
     });
     scheduleMomentCheck();
@@ -925,7 +924,11 @@ async function checkMomentProactive() {
         }
       }
     } else {
-      console.info('朋友圈 AI 暂不评论也不发动态', result);
+      if (result.reason === 'no_new_moment_signal') {
+        console.info('朋友圈暂无新动态信号，本次不调用 AI', result);
+      } else {
+        console.info('朋友圈 AI 暂不评论也不发动态', result);
+      }
     }
   } catch (error) {
     console.warn('朋友圈 AI 检查失败', error);

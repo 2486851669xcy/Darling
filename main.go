@@ -147,6 +147,12 @@ type AIConfig struct {
 	TimeoutSec  int
 }
 
+type TokenUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
 type App struct {
 	db          *sql.DB
 	chatConfig  AIConfig
@@ -280,6 +286,15 @@ CREATE TABLE IF NOT EXISTS moment_comments (
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_moment_comments_moment_created ON moment_comments(moment_id, created_at);
+CREATE TABLE IF NOT EXISTS moment_checks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  moment_id INTEGER NOT NULL,
+  author TEXT NOT NULL,
+  action TEXT NOT NULL DEFAULT 'seen',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(moment_id, author)
+);
+CREATE INDEX IF NOT EXISTS idx_moment_checks_moment_created ON moment_checks(moment_id, created_at);
 `)
 	return err
 }
@@ -383,9 +398,29 @@ func (a *App) handleProactiveMoment(c *gin.Context) {
 		return
 	}
 
+	latestLike, latestLiked, err := a.likeLatestUserMoment(c.Request.Context(), moments)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	uncheckedUserMoment := a.hasUncheckedUserMoment(c.Request.Context(), moments)
+	shouldCallAI := uncheckedUserMoment || canCharacterPostMoment(moments)
+	if !shouldCallAI {
+		if latestLiked {
+			c.JSON(http.StatusOK, gin.H{"skipped": false, "like": latestLike, "reason": "liked_new_user_moment_without_ai"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"skipped": true, "reason": "no_new_moment_signal"})
+		return
+	}
+
 	action, err := a.decideMomentAction(c.Request.Context(), character, moments)
 	if err != nil {
 		log.Printf("moment proactive skipped: %v", err)
+		if latestLiked {
+			c.JSON(http.StatusOK, gin.H{"skipped": false, "like": latestLike})
+			return
+		}
 		c.JSON(http.StatusOK, gin.H{"skipped": true})
 		return
 	}
@@ -394,13 +429,9 @@ func (a *App) handleProactiveMoment(c *gin.Context) {
 	case "comment":
 		action.Comment = cleanReplyBubbleText(action.Comment)
 		if action.MomentID == 0 || action.Comment == "" {
-			like, liked, err := a.likeLatestUserMoment(c.Request.Context(), moments)
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-				return
-			}
-			if liked {
-				c.JSON(http.StatusOK, gin.H{"skipped": false, "like": like})
+			a.markUncheckedUserMomentsSeen(c.Request.Context(), moments, "none")
+			if latestLiked {
+				c.JSON(http.StatusOK, gin.H{"skipped": false, "like": latestLike})
 				return
 			}
 			c.JSON(http.StatusOK, gin.H{"skipped": true})
@@ -416,20 +447,24 @@ func (a *App) handleProactiveMoment(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+		if err := a.saveMomentCheck(c.Request.Context(), action.MomentID, "character", "comment"); err != nil {
+			log.Printf("save moment check failed: %v", err)
+		}
 		payload := gin.H{"skipped": false, "comment": comment}
 		if liked {
 			payload["like"] = like
+		} else if latestLiked {
+			payload["like"] = latestLike
 		}
 		c.JSON(http.StatusOK, payload)
 	case "post":
 		content := cleanReplyBubbleText(action.Content)
 		if content == "" {
+			if latestLiked {
+				c.JSON(http.StatusOK, gin.H{"skipped": false, "like": latestLike})
+				return
+			}
 			c.JSON(http.StatusOK, gin.H{"skipped": true})
-			return
-		}
-		like, liked, err := a.likeLatestUserMoment(c.Request.Context(), moments)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
 		imageURL := ""
@@ -446,18 +481,14 @@ func (a *App) handleProactiveMoment(c *gin.Context) {
 			return
 		}
 		payload := gin.H{"skipped": false, "moment": moment}
-		if liked {
-			payload["like"] = like
+		if latestLiked {
+			payload["like"] = latestLike
 		}
 		c.JSON(http.StatusOK, payload)
 	default:
-		like, liked, err := a.likeLatestUserMoment(c.Request.Context(), moments)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		if liked {
-			c.JSON(http.StatusOK, gin.H{"skipped": false, "like": like})
+		a.markUncheckedUserMomentsSeen(c.Request.Context(), moments, "none")
+		if latestLiked {
+			c.JSON(http.StatusOK, gin.H{"skipped": false, "like": latestLike})
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"skipped": true})
@@ -1151,6 +1182,7 @@ func (a *App) callChatCompletion(ctx context.Context, body map[string]any) (stri
 				Content string `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
+		Usage TokenUsage `json:"usage"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return "", err
@@ -1158,6 +1190,7 @@ func (a *App) callChatCompletion(ctx context.Context, body map[string]any) (stri
 	if len(result.Choices) == 0 {
 		return "", errors.New("llm returned empty choices")
 	}
+	logTokenUsage("chat", a.chatConfig.Model, result.Usage)
 	return result.Choices[0].Message.Content, nil
 }
 
@@ -1303,6 +1336,7 @@ func (a *App) callImageAPIWithModel(ctx context.Context, model string, prompt st
 		Data []struct {
 			B64JSON string `json:"b64_json"`
 		} `json:"data"`
+		Usage TokenUsage `json:"usage"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, err
@@ -1313,12 +1347,28 @@ func (a *App) callImageAPIWithModel(ctx context.Context, model string, prompt st
 	if result.Data[0].B64JSON == "" {
 		return nil, errors.New("image api did not return b64_json")
 	}
+	logTokenUsage("image", model, result.Usage)
 	return base64.StdEncoding.DecodeString(result.Data[0].B64JSON)
 }
 
 func normalizeModelName(model string) string {
 	model = strings.TrimSpace(model)
 	return strings.TrimPrefix(model, "models/")
+}
+
+func logTokenUsage(kind, model string, usage TokenUsage) {
+	if usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.TotalTokens == 0 {
+		log.Printf("token usage: kind=%s model=%s usage=not_returned", kind, model)
+		return
+	}
+	log.Printf(
+		"token usage: kind=%s model=%s prompt_tokens=%d completion_tokens=%d total_tokens=%d",
+		kind,
+		model,
+		usage.PromptTokens,
+		usage.CompletionTokens,
+		usage.TotalTokens,
+	)
 }
 
 func (a *App) getAvatarFaceAnchor(ctx context.Context, ch *Character) string {
@@ -1840,6 +1890,61 @@ func canCommentMoment(momentID int64, moments []Moment) bool {
 			}
 		}
 		return true
+	}
+	return false
+}
+
+func (a *App) hasUncheckedUserMoment(ctx context.Context, moments []Moment) bool {
+	for _, moment := range moments {
+		if moment.Author != "user" || a.hasMomentCheck(ctx, moment.ID, "character") {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func (a *App) markUncheckedUserMomentsSeen(ctx context.Context, moments []Moment, action string) {
+	for _, moment := range moments {
+		if moment.Author != "user" || a.hasMomentCheck(ctx, moment.ID, "character") {
+			continue
+		}
+		if err := a.saveMomentCheck(ctx, moment.ID, "character", action); err != nil {
+			log.Printf("save moment check failed: %v", err)
+		}
+	}
+}
+
+func (a *App) hasMomentCheck(ctx context.Context, momentID int64, author string) bool {
+	var exists int
+	err := a.db.QueryRowContext(ctx, `
+SELECT 1
+FROM moment_checks
+WHERE moment_id = ? AND author = ?
+LIMIT 1`, momentID, author).Scan(&exists)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		log.Printf("check moment check failed: %v", err)
+	}
+	return exists == 1
+}
+
+func (a *App) saveMomentCheck(ctx context.Context, momentID int64, author, action string) error {
+	action = strings.TrimSpace(action)
+	if action == "" {
+		action = "seen"
+	}
+	_, err := a.db.ExecContext(ctx, `
+INSERT INTO moment_checks(moment_id, author, action)
+VALUES (?, ?, ?)
+ON CONFLICT(moment_id, author) DO UPDATE SET action = excluded.action`, momentID, author, action)
+	return err
+}
+
+func hasMomentComment(moment Moment, author string) bool {
+	for _, comment := range moment.Comments {
+		if comment.Author == author {
+			return true
+		}
 	}
 	return false
 }
