@@ -1,0 +1,9 @@
+.git
+.idea
+.env
+*.db
+*.db-*
+dimension.db
+dimension-messenger-demo.exe
+data/generated/
+data/stickers/

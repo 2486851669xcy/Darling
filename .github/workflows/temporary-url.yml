@@ -1,0 +1,88 @@
+name: Temporary public URL
+
+on:
+  workflow_dispatch:
+
+jobs:
+  serve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      PORT: "8080"
+      DATABASE_PATH: ./runtime/dimension.db
+      AI_MID_API_KEY: ${{ secrets.AI_MID_API_KEY }}
+      AI_MID_BASE_URL: ${{ secrets.AI_MID_BASE_URL }}
+      AI_MID_MODEL: ${{ secrets.AI_MID_MODEL }}
+      AI_MID_TEMPERATURE: ${{ secrets.AI_MID_TEMPERATURE }}
+      AI_MID_MAX_TOKENS: ${{ secrets.AI_MID_MAX_TOKENS }}
+      AI_MID_TIMEOUT: ${{ secrets.AI_MID_TIMEOUT }}
+      AI_HIGH_API_KEY: ${{ secrets.AI_HIGH_API_KEY }}
+      AI_HIGH_BASE_URL: ${{ secrets.AI_HIGH_BASE_URL }}
+      AI_HIGH_MODEL: ${{ secrets.AI_HIGH_MODEL }}
+      AI_HIGH_TEMPERATURE: ${{ secrets.AI_HIGH_TEMPERATURE }}
+      AI_HIGH_MAX_TOKENS: ${{ secrets.AI_HIGH_MAX_TOKENS }}
+      AI_HIGH_TIMEOUT: ${{ secrets.AI_HIGH_TIMEOUT }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+
+      - name: Build app
+        run: go build -o darling .
+
+      - name: Download tunnel
+        run: |
+          curl -fsSL -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x cloudflared
+
+      - name: Start app and tunnel
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p runtime
+          ./darling > app.log 2>&1 &
+          app_pid=$!
+
+          for i in {1..30}; do
+            if curl -fsS "http://127.0.0.1:${PORT}/api/character?character_id=luna" >/dev/null; then
+              break
+            fi
+            if ! kill -0 "$app_pid" 2>/dev/null; then
+              cat app.log
+              exit 1
+            fi
+            sleep 2
+          done
+
+          ./cloudflared tunnel --url "http://127.0.0.1:${PORT}" --no-autoupdate > tunnel.log 2>&1 &
+          tunnel_pid=$!
+
+          public_url=""
+          for i in {1..60}; do
+            public_url="$(grep -Eo 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' tunnel.log | head -n 1 || true)"
+            if [ -n "$public_url" ]; then
+              echo "PUBLIC_URL=$public_url" >> "$GITHUB_ENV"
+              echo "### Public URL" >> "$GITHUB_STEP_SUMMARY"
+              echo "$public_url" >> "$GITHUB_STEP_SUMMARY"
+              echo "$public_url"
+              break
+            fi
+            if ! kill -0 "$tunnel_pid" 2>/dev/null; then
+              cat tunnel.log
+              exit 1
+            fi
+            sleep 2
+          done
+
+          if [ -z "$public_url" ]; then
+            cat tunnel.log
+            exit 1
+          fi
+
+          while kill -0 "$app_pid" 2>/dev/null && kill -0 "$tunnel_pid" 2>/dev/null; do
+            sleep 30
+          done

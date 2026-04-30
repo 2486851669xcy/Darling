@@ -179,11 +179,15 @@ func main() {
 	}
 	defer app.db.Close()
 
+	dataDir := getDataDir()
+	port := getServerPort()
+	addr := ":" + port
+
 	r := gin.Default()
 	r.StaticFile("/", "./web/index.html")
 	r.StaticFile("/app.js", "./web/app.js")
 	r.StaticFile("/style.css", "./web/style.css")
-	r.Static("/static", "./data")
+	r.Static("/static", dataDir)
 
 	r.GET("/api/messages", app.handleGetMessages)
 	r.GET("/api/character", app.handleGetCharacter)
@@ -196,7 +200,7 @@ func main() {
 	r.POST("/api/stickers/crawl", app.handleCrawlStickers)
 	r.POST("/api/messages/clear", app.handleClearMessages)
 
-	log.Println("DimensionMessenger demo started: http://localhost:8080")
+	log.Printf("DimensionMessenger demo started: http://localhost:%s", port)
 	log.Printf("Chat model: %s, base_url: %s", app.chatConfig.Model, app.chatConfig.BaseURL)
 	log.Printf("Image model: %s, base_url: %s", app.imageConfig.Model, app.imageConfig.BaseURL)
 	if app.chatConfig.APIKey == "" {
@@ -207,13 +211,17 @@ func main() {
 	}
 	app.warmCharacterStickerLibraryAsync("luna")
 
-	if err := r.Run(":8080"); err != nil {
+	if err := r.Run(addr); err != nil {
 		log.Fatal(err)
 	}
 }
 
 func NewApp() (*App, error) {
-	db, err := sql.Open("sqlite", "dimension.db")
+	dbPath := getDatabasePath()
+	if err := ensureParentDir(dbPath); err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, err
 	}
@@ -842,7 +850,7 @@ func (a *App) handleProactiveChat(c *gin.Context) {
 }
 
 func loadCharacter(characterID string) (*Character, error) {
-	path := filepath.Join("data", "characters", characterID+".yaml")
+	path := filepath.Join(getDataDir(), "characters", characterID+".yaml")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read character card: %w", err)
@@ -1440,7 +1448,7 @@ func (a *App) loadImageBytes(ctx context.Context, source string) ([]byte, string
 		}
 		return data, mimeType, nil
 	case strings.HasPrefix(source, "/static/"):
-		localPath := filepath.Join("data", strings.TrimPrefix(source, "/static/"))
+		localPath := filepath.Join(getDataDir(), strings.TrimPrefix(source, "/static/"))
 		data, err := os.ReadFile(localPath)
 		if err != nil {
 			return nil, "", err
@@ -2581,6 +2589,30 @@ func getEnv(key, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func getServerPort() string {
+	port := strings.TrimSpace(getEnv("PORT", "8080"))
+	return strings.TrimPrefix(port, ":")
+}
+
+func getDataDir() string {
+	return getEnv("DATA_DIR", "data")
+}
+
+func getDatabasePath() string {
+	if value := strings.TrimSpace(os.Getenv("DATABASE_PATH")); value != "" {
+		return value
+	}
+	return getEnv("DB_PATH", "dimension.db")
+}
+
+func ensureParentDir(path string) error {
+	dir := filepath.Dir(path)
+	if dir == "." || dir == "" {
+		return nil
+	}
+	return os.MkdirAll(dir, 0755)
 }
 
 func getEnvInt(key string, fallback int) int {
