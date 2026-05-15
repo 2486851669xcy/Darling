@@ -2,6 +2,8 @@
 
 把 AI 角色装进一个像微信一样的 H5 小世界里。
 
+项目地址：[https://github.com/Candyman2077/Darling](https://github.com/Candyman2077/Darling)
+
 Darling 是一个本地可运行的二次元陪伴聊天 Demo：你可以和角色聊天、发朋友圈、等她主动找你、看她点赞评论你的动态，甚至看她自己发朋友圈。它不是一个冷冰冰的问答框，而是一个会“生活”在消息列表和朋友圈里的角色。
 
 默认角色是 **樱岛麻衣** 风格。你也可以把她换成任何你喜欢的角色。
@@ -50,7 +52,14 @@ Darling 是一个本地可运行的二次元陪伴聊天 Demo：你可以和角�
 
 ## 快速开始
 
-### 1. 准备
+### 1. 克隆项目
+
+```powershell
+git clone https://github.com/Candyman2077/Darling.git
+cd Darling
+```
+
+### 2. 准备
 
 你需要：
 
@@ -58,7 +67,7 @@ Darling 是一个本地可运行的二次元陪伴聊天 Demo：你可以和角�
 - 一个 OpenAI 兼容格式的聊天模型 API Key
 - 如果想让 AI 发图，再准备一个图片模型 API Key
 
-### 2. 配置 `.env`
+### 3. 配置 `.env`
 
 在项目根目录新建 `.env`：
 
@@ -82,7 +91,7 @@ AI_HIGH_TIMEOUT=300
 
 不要把真实 API Key 提交到 GitHub。
 
-### 3. 启动
+### 4. 启动
 
 ```powershell
 go run .
