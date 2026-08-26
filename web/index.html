@@ -96,6 +96,38 @@
             </div>
             <span class="profile-qr">▣</span>
           </section>
+          <section class="wechat-login-section" aria-labelledby="wechatLoginHeading">
+            <h2 id="wechatLoginHeading" class="wechat-login-heading">账号与登录</h2>
+            <button
+              id="wechatLoginBtn"
+              class="wechat-login-row is-checking"
+              type="button"
+              aria-label="微信扫码登录状态正在检查"
+              aria-describedby="wechatLoginDetail wechatLoginFeedback"
+              disabled
+            >
+              <span id="wechatLoginIcon" class="wechat-login-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                  <path d="M4 4h6v6H4V4Zm2 2v2h2V6H6Zm8-2h6v6h-6V4Zm2 2v2h2V6h-2ZM4 14h6v6H4v-6Zm2 2v2h2v-2H6Zm8-2h2v2h-2v-2Zm4 0h2v4h-2v-4Zm-4 4h4v2h-4v-2Z" />
+                </svg>
+              </span>
+              <img id="wechatUserAvatar" class="wechat-user-avatar" alt="" width="40" height="40" referrerpolicy="no-referrer" hidden />
+              <span class="wechat-login-copy">
+                <strong id="wechatLoginTitle">微信扫码登录</strong>
+                <span id="wechatLoginDetail">正在检查登录配置…</span>
+              </span>
+              <span id="wechatLoginStatus" class="wechat-login-status">检查中</span>
+            </button>
+            <div id="wechatAccountActions" class="wechat-account-actions" hidden>
+              <button id="wechatLogoutBtn" class="wechat-logout-button" type="button" aria-label="退出微信登录" aria-describedby="wechatLoginFeedback">
+                <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                  <path d="M10 5H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h4M14 8l4 4-4 4M9 12h9" />
+                </svg>
+                <span id="wechatLogoutLabel">退出微信登录</span>
+              </button>
+            </div>
+            <p id="wechatLoginFeedback" class="wechat-login-feedback" role="status" aria-live="polite" aria-atomic="true"></p>
+          </section>
           <section class="settings-list wechat-list">
             <button class="wechat-row" type="button">
               <span class="wechat-icon green">服</span>

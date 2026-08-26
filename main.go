@@ -13,16 +13,17 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"gopkg.in/yaml.v3"
-	_ "modernc.org/sqlite"
 )
 
 type Character struct {
@@ -115,6 +116,7 @@ type SendChatResponse struct {
 	UserMessages          []Message `json:"user_messages,omitempty"`
 	Emotion               string    `json:"emotion"`
 	Skipped               bool      `json:"skipped,omitempty"`
+	Reason                string    `json:"reason,omitempty"`
 	NextCheckAfterSeconds int       `json:"next_check_after_seconds,omitempty"`
 }
 
@@ -154,13 +156,24 @@ type TokenUsage struct {
 }
 
 type App struct {
-	db          *sql.DB
-	chatConfig  AIConfig
-	imageConfig AIConfig
-	chatClient  *http.Client
-	imageClient *http.Client
-	avatarMu    sync.RWMutex
-	avatarCache map[string]string
+	db               *sql.DB
+	users            PostgresUserStore
+	sessions         PostgresSessionStore
+	wechatAuth       *WeChatAuth
+	agent            ConversationAgent
+	chatConfig       AIConfig
+	imageConfig      AIConfig
+	chatClient       *http.Client
+	imageClient      *http.Client
+	webClient        *http.Client
+	avatarMu         sync.RWMutex
+	avatarCache      map[string]string
+	lifecycleMu      sync.Mutex
+	requestWG        sync.WaitGroup
+	backgroundWG     sync.WaitGroup
+	backgroundCtx    context.Context
+	backgroundCancel context.CancelFunc
+	closing          bool
 }
 
 type StickerCadence struct {
@@ -169,152 +182,222 @@ type StickerCadence struct {
 }
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() (returnErr error) {
 	if err := loadDotEnv(".env"); err != nil {
 		log.Printf("skip .env: %v", err)
 	}
 
 	app, err := NewApp()
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
-	defer app.db.Close()
+	defer func() {
+		if err := app.Close(); err != nil {
+			if returnErr == nil {
+				returnErr = fmt.Errorf("close app: %w", err)
+			} else {
+				log.Printf("close app: %v", err)
+			}
+		}
+	}()
 
 	dataDir := getDataDir()
+	staticFS, err := newSafeStaticFileSystem(dataDir)
+	if err != nil {
+		return err
+	}
 	port := getServerPort()
 	addr := ":" + port
 
-	r := gin.Default()
+	r := gin.New()
+	r.Use(
+		gin.LoggerWithConfig(gin.LoggerConfig{
+			SkipPaths: []string{"/api/auth/wechat/callback"},
+		}),
+		sanitizedRecoveryMiddleware(),
+	)
 	r.StaticFile("/", "./web/index.html")
 	r.StaticFile("/app.js", "./web/app.js")
 	r.StaticFile("/style.css", "./web/style.css")
-	r.Static("/static", dataDir)
+	r.StaticFS("/static", staticFS)
 
-	r.GET("/api/messages", app.handleGetMessages)
-	r.GET("/api/character", app.handleGetCharacter)
-	r.GET("/api/moments", app.handleGetMoments)
-	r.POST("/api/moments", app.handleCreateMoment)
-	r.POST("/api/moments/proactive", app.handleProactiveMoment)
-	r.POST("/api/chat/send", app.handleSendChat)
-	r.POST("/api/chat/send_batch", app.handleSendChatBatch)
-	r.POST("/api/chat/proactive", app.handleProactiveChat)
-	r.POST("/api/stickers/crawl", app.handleCrawlStickers)
-	r.POST("/api/messages/clear", app.handleClearMessages)
+	auth := r.Group("/api/auth")
+	auth.Use(app.requestLifecycleMiddleware())
+	auth.GET("/wechat/start", app.wechatAuth.LoginHandler())
+	auth.GET("/wechat/callback", app.wechatAuth.CallbackHandler(app))
+	auth.GET("/wechat/status", app.wechatAuth.StatusHandler())
+	auth.POST("/logout", app.handleLogout)
+
+	api := r.Group("/api")
+	api.Use(app.userSessionMiddleware())
+	api.GET("/session", app.wechatAuth.SessionHandler(app))
+	api.GET("/messages", app.handleGetMessages)
+	api.GET("/character", app.handleGetCharacter)
+	api.GET("/moments", app.handleGetMoments)
+	api.POST("/moments", app.handleCreateMoment)
+	api.POST("/moments/proactive", app.handleProactiveMoment)
+	api.POST("/chat/send", app.handleSendChat)
+	api.POST("/chat/send_batch", app.handleSendChatBatch)
+	api.POST("/chat/proactive", app.handleProactiveChat)
+	api.POST("/stickers/crawl", app.handleCrawlStickers)
+	api.POST("/messages/clear", app.handleClearMessages)
 
 	log.Printf("DimensionMessenger demo started: http://localhost:%s", port)
-	log.Printf("Chat model: %s, base_url: %s", app.chatConfig.Model, app.chatConfig.BaseURL)
+	log.Printf("DeepSeek agent model: %s, base_url: %s", app.chatConfig.Model, app.chatConfig.BaseURL)
 	log.Printf("Image model: %s, base_url: %s", app.imageConfig.Model, app.imageConfig.BaseURL)
 	if app.chatConfig.APIKey == "" {
-		log.Println("WARNING: AI_MID_API_KEY is empty. Set it before chatting.")
+		log.Println("WARNING: DEEPSEEK_API_KEY is empty. Chat decisions will be unavailable.")
 	}
 	if app.imageConfig.APIKey == "" {
 		log.Println("WARNING: AI_HIGH_API_KEY is empty. Image generation will be skipped.")
 	}
-	app.warmCharacterStickerLibraryAsync("luna")
+	server := &http.Server{Addr: addr, Handler: r}
+	serverErrors := make(chan error, 1)
+	shutdownSignal, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
 
-	if err := r.Run(addr); err != nil {
-		log.Fatal(err)
+	go func() {
+		serverErrors <- server.ListenAndServe()
+	}()
+
+	select {
+	case err := <-serverErrors:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-shutdownSignal.Done():
+		log.Println("shutdown signal received")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			_ = server.Close()
+			return fmt.Errorf("shutdown server: %w", err)
+		}
+		if err := <-serverErrors; err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
 	}
 }
 
 func NewApp() (*App, error) {
-	dbPath := getDatabasePath()
-	if err := ensureParentDir(dbPath); err != nil {
-		return nil, err
-	}
-	db, err := sql.Open("sqlite", dbPath)
+	databaseCtx, cancelDatabase := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelDatabase()
+	db, err := OpenPostgres(
+		databaseCtx,
+		getDatabaseURL(),
+		getEnvInt("DATABASE_MAX_OPEN_CONNS", 20),
+		getEnvInt("DATABASE_MAX_IDLE_CONNS", 5),
+	)
 	if err != nil {
 		return nil, err
 	}
-	if err := initDB(db); err != nil {
+	if err := initWeChatAuthSchema(databaseCtx, db); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 
 	chatCfg := loadChatConfig()
 	imageCfg := loadImageConfig()
+	chatClient := &http.Client{Timeout: time.Duration(chatCfg.TimeoutSec) * time.Second}
+	agent, err := NewDeepSeekAgent(DeepSeekAgentConfig{
+		BaseURL:     chatCfg.BaseURL,
+		APIKey:      chatCfg.APIKey,
+		Model:       chatCfg.Model,
+		Temperature: chatCfg.Temperature,
+		MaxTokens:   chatCfg.MaxTokens,
+	}, chatClient)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("create conversation agent: %w", err)
+	}
+	wechatAuth := NewWeChatAuth(
+		LoadWeChatAuthConfig(),
+		&http.Client{Timeout: 15 * time.Second},
+	)
+	backgroundCtx, backgroundCancel := context.WithCancel(context.Background())
 
 	return &App{
-		db:          db,
-		chatConfig:  chatCfg,
-		imageConfig: imageCfg,
-		chatClient: &http.Client{
-			Timeout: time.Duration(chatCfg.TimeoutSec) * time.Second,
-		},
-		imageClient: &http.Client{
-			Timeout: time.Duration(imageCfg.TimeoutSec) * time.Second,
-		},
-		avatarCache: make(map[string]string),
+		db:               db,
+		users:            PostgresUserStore{DB: db, MaxUsers: getEnvInt("USER_DB_MAX_USERS", 1000)},
+		sessions:         PostgresSessionStore{DB: db, TTL: defaultSessionTTL},
+		wechatAuth:       wechatAuth,
+		agent:            agent,
+		chatConfig:       chatCfg,
+		imageConfig:      imageCfg,
+		chatClient:       chatClient,
+		imageClient:      &http.Client{Timeout: time.Duration(imageCfg.TimeoutSec) * time.Second},
+		webClient:        &http.Client{Timeout: 30 * time.Second},
+		backgroundCtx:    backgroundCtx,
+		backgroundCancel: backgroundCancel,
+		avatarCache:      make(map[string]string),
 	}, nil
 }
 
-func initDB(db *sql.DB) error {
-	_, err := db.Exec(`
-CREATE TABLE IF NOT EXISTS messages (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  character_id TEXT NOT NULL,
-  sender TEXT NOT NULL,
-  message_type TEXT NOT NULL DEFAULT 'text',
-  content TEXT NOT NULL,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS idx_messages_character_created ON messages(character_id, created_at);
-CREATE TABLE IF NOT EXISTS sticker_assets (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  character_id TEXT NOT NULL,
-  emotion TEXT NOT NULL,
-  url TEXT NOT NULL,
-  source TEXT NOT NULL DEFAULT 'generated',
-  prompt TEXT NOT NULL DEFAULT '',
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  last_used_at DATETIME
-);
-CREATE INDEX IF NOT EXISTS idx_sticker_assets_lookup ON sticker_assets(character_id, emotion, created_at);
-CREATE TABLE IF NOT EXISTS moments (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  character_id TEXT NOT NULL,
-  author TEXT NOT NULL,
-  content TEXT NOT NULL DEFAULT '',
-  image_url TEXT NOT NULL DEFAULT '',
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS idx_moments_character_created ON moments(character_id, created_at);
-CREATE TABLE IF NOT EXISTS moment_likes (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  moment_id INTEGER NOT NULL,
-  author TEXT NOT NULL,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(moment_id, author)
-);
-CREATE INDEX IF NOT EXISTS idx_moment_likes_moment_created ON moment_likes(moment_id, created_at);
-CREATE TABLE IF NOT EXISTS moment_comments (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  moment_id INTEGER NOT NULL,
-  author TEXT NOT NULL,
-  content TEXT NOT NULL,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS idx_moment_comments_moment_created ON moment_comments(moment_id, created_at);
-CREATE TABLE IF NOT EXISTS moment_checks (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  moment_id INTEGER NOT NULL,
-  author TEXT NOT NULL,
-  action TEXT NOT NULL DEFAULT 'seen',
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(moment_id, author)
-);
-CREATE INDEX IF NOT EXISTS idx_moment_checks_moment_created ON moment_checks(moment_id, created_at);
-`)
-	return err
+func (a *App) beginRequest() bool {
+	if a == nil {
+		return false
+	}
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+	if a.closing {
+		return false
+	}
+	a.requestWG.Add(1)
+	return true
+}
+
+func (a *App) requestLifecycleMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !a.beginRequest() {
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "server is shutting down"})
+			return
+		}
+		defer a.endRequest()
+		c.Next()
+	}
+}
+
+func (a *App) endRequest() {
+	if a != nil {
+		a.requestWG.Done()
+	}
+}
+
+func (a *App) Close() error {
+	if a == nil {
+		return nil
+	}
+	a.lifecycleMu.Lock()
+	alreadyClosed := a.closing
+	a.closing = true
+	cancel := a.backgroundCancel
+	a.lifecycleMu.Unlock()
+	if !alreadyClosed && cancel != nil {
+		cancel()
+	}
+	a.requestWG.Wait()
+	a.backgroundWG.Wait()
+	if a.db == nil {
+		return nil
+	}
+	return a.db.Close()
 }
 
 func loadChatConfig() AIConfig {
 	return AIConfig{
-		BaseURL:     getEnv("AI_MID_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
-		APIKey:      getEnv("AI_MID_API_KEY", ""),
-		Model:       getEnv("AI_MID_MODEL", "qwen-plus"),
-		Temperature: getEnvFloat("AI_MID_TEMPERATURE", 0.7),
-		MaxTokens:   getEnvInt("AI_MID_MAX_TOKENS", 4096),
-		TimeoutSec:  getEnvInt("AI_MID_TIMEOUT", 120),
+		BaseURL:     getEnv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+		APIKey:      getEnv("DEEPSEEK_API_KEY", ""),
+		Model:       getEnv("DEEPSEEK_MODEL", "deepseek-v4-flash"),
+		Temperature: getEnvFloat("DEEPSEEK_TEMPERATURE", 1.0),
+		MaxTokens:   getEnvInt("DEEPSEEK_MAX_TOKENS", 1024),
+		TimeoutSec:  getEnvInt("DEEPSEEK_TIMEOUT", 90),
 	}
 }
 
@@ -468,6 +551,7 @@ func (a *App) handleProactiveMoment(c *gin.Context) {
 	case "post":
 		content := cleanReplyBubbleText(action.Content)
 		if content == "" {
+			a.markUncheckedUserMomentsSeen(c.Request.Context(), moments, "none")
 			if latestLiked {
 				c.JSON(http.StatusOK, gin.H{"skipped": false, "like": latestLike})
 				return
@@ -488,6 +572,7 @@ func (a *App) handleProactiveMoment(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+		a.markUncheckedUserMomentsSeen(c.Request.Context(), moments, "post")
 		payload := gin.H{"skipped": false, "moment": moment}
 		if latestLiked {
 			payload["like"] = latestLike
@@ -505,7 +590,7 @@ func (a *App) handleProactiveMoment(c *gin.Context) {
 
 func (a *App) handleClearMessages(c *gin.Context) {
 	characterID := c.DefaultQuery("character_id", "luna")
-	if _, err := a.db.ExecContext(c.Request.Context(), "DELETE FROM messages WHERE character_id = ?", characterID); err != nil {
+	if err := a.clearMessages(c.Request.Context(), characterID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -537,6 +622,7 @@ func (a *App) handleCrawlStickers(c *gin.Context) {
 }
 
 func (a *App) handleSendChat(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 64<<10)
 	var req SendChatRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -551,98 +637,44 @@ func (a *App) handleSendChat(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "message is required"})
 		return
 	}
+	if len([]rune(req.Message)) > 2000 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "message is too long"})
+		return
+	}
 
 	character, err := loadCharacter(req.CharacterID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
-	userMsg, err := a.saveMessage(c.Request.Context(), req.CharacterID, "user", "text", req.Message)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
 	recent, err := a.getRecentMessages(c.Request.Context(), req.CharacterID, 14)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
 	moments, err := a.getMoments(c.Request.Context(), req.CharacterID, 12)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
-	prompt := buildPrompt(character, recent, moments, req.Message)
-	raw, err := a.callLLM(c.Request.Context(), prompt)
+	userMessage, err := a.saveMessage(c.Request.Context(), req.CharacterID, "user", "text", req.Message)
 	if err != nil {
-		log.Printf("llm error: %v", err)
-		fallback, _ := a.saveMessage(c.Request.Context(), req.CharacterID, "character", "text", "呜……刚刚信号好像有点不稳定，可以再和我说一次吗？")
-		c.JSON(http.StatusOK, SendChatResponse{Messages: []Message{fallback}, Emotion: "neutral"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
-	parsed, err := parseLLMReply(raw)
-	if err != nil {
-		log.Printf("parse llm json error: %v, raw=%s", err, raw)
-		parsed = LLMReply{
-			Emotion:             "neutral",
-			Reply:               "唔……我刚刚有点走神了，可以再说一次吗？",
-			ShouldSendSticker:   false,
-			ShouldGenerateImage: false,
-		}
-	}
-
-	parsed.Emotion = normalizeEmotion(parsed.Emotion)
-	parsed.Reply = strings.TrimSpace(parsed.Reply)
-	parsed.ImagePrompt = strings.TrimSpace(parsed.ImagePrompt)
-	if parsed.ShouldReply != nil && !*parsed.ShouldReply {
-		log.Printf("user msg saved: %d, character skipped reply", userMsg.ID)
-		c.JSON(http.StatusOK, SendChatResponse{Messages: nil, Emotion: parsed.Emotion, Skipped: true})
-		return
-	}
-	replyParts := normalizeReplyParts(parsed, "嗯哼，我在听哦。", 3)
-	parsed.Reply = strings.Join(replyParts, "\n")
-
-	result := make([]Message, 0, len(replyParts)+2)
-	for _, part := range replyParts {
-		characterMsg, err := a.saveMessage(c.Request.Context(), req.CharacterID, "character", "text", part)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		result = append(result, characterMsg)
-	}
-
-	if a.shouldSendSticker(c.Request.Context(), character, parsed) {
-		if stickerURL := a.pickSticker(c.Request.Context(), character, parsed.Emotion); stickerURL != "" {
-			stickerMsg, err := a.saveMessage(c.Request.Context(), req.CharacterID, "character", "sticker", stickerURL)
-			if err == nil {
-				result = append(result, stickerMsg)
-			}
-		}
-	}
-
-	if shouldGenerateImage(parsed) {
-		imageURL, err := a.generateCharacterImage(c.Request.Context(), character, req.Message, parsed)
-		if err != nil {
-			log.Printf("image generation skipped: %v", err)
-		} else if imageURL != "" {
-			imageMsg, err := a.saveMessage(c.Request.Context(), req.CharacterID, "character", "image", imageURL)
-			if err == nil {
-				result = append(result, imageMsg)
-			}
-		}
-	}
-
-	log.Printf("user msg saved: %d", userMsg.ID)
-	c.JSON(http.StatusOK, SendChatResponse{Messages: result, Emotion: parsed.Emotion})
+	input := a.buildAgentInput(c.Request.Context(), AgentModeChat, character, recent, moments, []string{req.Message})
+	result := a.decideAndExecuteConversation(c.Request.Context(), input)
+	log.Printf("user message saved: %d; agent action result: %s", userMessage.ID, result.Reason)
+	c.JSON(http.StatusOK, SendChatResponse{
+		Messages: result.Messages,
+		Emotion:  result.Emotion,
+		Skipped:  result.Skipped,
+		Reason:   result.Reason,
+	})
 }
 
 func (a *App) handleSendChatBatch(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 128<<10)
 	var req SendChatBatchRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -652,16 +684,24 @@ func (a *App) handleSendChatBatch(c *gin.Context) {
 	if req.CharacterID == "" {
 		req.CharacterID = "luna"
 	}
-
 	cleanedMessages := make([]string, 0, len(req.Messages))
 	for _, message := range req.Messages {
 		message = strings.TrimSpace(message)
-		if message != "" {
-			cleanedMessages = append(cleanedMessages, message)
+		if message == "" {
+			continue
 		}
+		if len([]rune(message)) > 2000 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "message is too long"})
+			return
+		}
+		cleanedMessages = append(cleanedMessages, message)
 	}
 	if len(cleanedMessages) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "messages is required"})
+		return
+	}
+	if len(cleanedMessages) > 8 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "too many messages"})
 		return
 	}
 
@@ -670,95 +710,38 @@ func (a *App) handleSendChatBatch(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
-	userMessages := make([]Message, 0, len(cleanedMessages))
-	for _, message := range cleanedMessages {
-		userMsg, err := a.saveMessage(c.Request.Context(), req.CharacterID, "user", "text", message)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		userMessages = append(userMessages, userMsg)
-	}
-
 	recent, err := a.getRecentMessages(c.Request.Context(), req.CharacterID, 18)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
 	moments, err := a.getMoments(c.Request.Context(), req.CharacterID, 12)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
-	combinedMessage := buildBatchUserMessage(cleanedMessages)
-	prompt := buildPrompt(character, recent, moments, combinedMessage)
-	raw, err := a.callLLM(c.Request.Context(), prompt)
-	if err != nil {
-		log.Printf("batch llm error: %v", err)
-		fallback, _ := a.saveMessage(c.Request.Context(), req.CharacterID, "character", "text", "呜……刚刚信号好像有点不稳定，可以再和我说一次吗？")
-		c.JSON(http.StatusOK, SendChatResponse{UserMessages: userMessages, Messages: []Message{fallback}, Emotion: "neutral"})
-		return
-	}
-
-	parsed, err := parseLLMReply(raw)
-	if err != nil {
-		log.Printf("parse batch llm json error: %v, raw=%s", err, raw)
-		parsed = LLMReply{
-			Emotion:             "neutral",
-			Reply:               "唔……我刚刚有点走神了，可以再说一次吗？",
-			ShouldSendSticker:   false,
-			ShouldGenerateImage: false,
-		}
-	}
-
-	parsed.Emotion = normalizeEmotion(parsed.Emotion)
-	parsed.Reply = strings.TrimSpace(parsed.Reply)
-	parsed.ImagePrompt = strings.TrimSpace(parsed.ImagePrompt)
-	if parsed.ShouldReply != nil && !*parsed.ShouldReply {
-		c.JSON(http.StatusOK, SendChatResponse{UserMessages: userMessages, Messages: nil, Emotion: parsed.Emotion, Skipped: true})
-		return
-	}
-	replyParts := normalizeReplyParts(parsed, "嗯哼，我在听哦。", 3)
-	parsed.Reply = strings.Join(replyParts, "\n")
-
-	result := make([]Message, 0, len(replyParts)+2)
-	for _, part := range replyParts {
-		characterMsg, err := a.saveMessage(c.Request.Context(), req.CharacterID, "character", "text", part)
+	userMessages := make([]Message, 0, len(cleanedMessages))
+	for _, message := range cleanedMessages {
+		saved, err := a.saveMessage(c.Request.Context(), req.CharacterID, "user", "text", message)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		result = append(result, characterMsg)
+		userMessages = append(userMessages, saved)
 	}
-
-	if a.shouldSendSticker(c.Request.Context(), character, parsed) {
-		if stickerURL := a.pickSticker(c.Request.Context(), character, parsed.Emotion); stickerURL != "" {
-			stickerMsg, err := a.saveMessage(c.Request.Context(), req.CharacterID, "character", "sticker", stickerURL)
-			if err == nil {
-				result = append(result, stickerMsg)
-			}
-		}
-	}
-
-	if shouldGenerateImage(parsed) {
-		imageURL, err := a.generateCharacterImage(c.Request.Context(), character, combinedMessage, parsed)
-		if err != nil {
-			log.Printf("batch image generation skipped: %v", err)
-		} else if imageURL != "" {
-			imageMsg, err := a.saveMessage(c.Request.Context(), req.CharacterID, "character", "image", imageURL)
-			if err == nil {
-				result = append(result, imageMsg)
-			}
-		}
-	}
-
-	c.JSON(http.StatusOK, SendChatResponse{UserMessages: userMessages, Messages: result, Emotion: parsed.Emotion})
+	input := a.buildAgentInput(c.Request.Context(), AgentModeBatch, character, recent, moments, cleanedMessages)
+	result := a.decideAndExecuteConversation(c.Request.Context(), input)
+	c.JSON(http.StatusOK, SendChatResponse{
+		UserMessages: userMessages,
+		Messages:     result.Messages,
+		Emotion:      result.Emotion,
+		Skipped:      result.Skipped,
+		Reason:       result.Reason,
+	})
 }
 
 func (a *App) handleProactiveChat(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 16<<10)
 	var req ProactiveChatRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -768,85 +751,33 @@ func (a *App) handleProactiveChat(c *gin.Context) {
 	if req.CharacterID == "" {
 		req.CharacterID = "luna"
 	}
-
 	character, err := loadCharacter(req.CharacterID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
 	ok, nextCheckAfterSeconds, err := a.canSendProactiveMessage(c.Request.Context(), req.CharacterID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	if !ok {
-		c.JSON(http.StatusOK, SendChatResponse{
-			Messages:              nil,
-			Emotion:               "neutral",
-			Skipped:               true,
-			NextCheckAfterSeconds: nextCheckAfterSeconds,
-		})
+		c.JSON(http.StatusOK, SendChatResponse{Skipped: true, Emotion: "neutral", Reason: "cooldown", NextCheckAfterSeconds: nextCheckAfterSeconds})
 		return
 	}
-
 	recent, err := a.getRecentMessages(c.Request.Context(), req.CharacterID, 14)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
 	moments, err := a.getMoments(c.Request.Context(), req.CharacterID, 12)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
-	prompt := buildProactivePrompt(character, recent, moments)
-	raw, err := a.callLLM(c.Request.Context(), prompt)
-	if err != nil {
-		log.Printf("proactive llm error: %v", err)
-		c.JSON(http.StatusOK, SendChatResponse{Messages: nil, Emotion: "neutral", Skipped: true})
-		return
-	}
-
-	parsed, err := parseLLMReply(raw)
-	if err != nil {
-		log.Printf("parse proactive llm json error: %v, raw=%s", err, raw)
-		c.JSON(http.StatusOK, SendChatResponse{Messages: nil, Emotion: "neutral", Skipped: true})
-		return
-	}
-
-	parsed.Emotion = normalizeEmotion(parsed.Emotion)
-	parsed.Reply = strings.TrimSpace(parsed.Reply)
-	replyParts := normalizeReplyParts(parsed, "", 3)
-	if len(replyParts) == 0 {
-		c.JSON(http.StatusOK, SendChatResponse{Messages: nil, Emotion: parsed.Emotion, Skipped: true})
-		return
-	}
-	parsed.Reply = strings.Join(replyParts, "\n")
-	parsed.ShouldGenerateImage = false
-
-	result := make([]Message, 0, len(replyParts)+1)
-	for _, part := range replyParts {
-		characterMsg, err := a.saveMessage(c.Request.Context(), req.CharacterID, "character", "text", part)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		result = append(result, characterMsg)
-	}
-
-	if a.shouldSendSticker(c.Request.Context(), character, parsed) {
-		if stickerURL := a.pickSticker(c.Request.Context(), character, parsed.Emotion); stickerURL != "" {
-			stickerMsg, err := a.saveMessage(c.Request.Context(), req.CharacterID, "character", "sticker", stickerURL)
-			if err == nil {
-				result = append(result, stickerMsg)
-			}
-		}
-	}
-
-	c.JSON(http.StatusOK, SendChatResponse{Messages: result, Emotion: parsed.Emotion})
+	input := a.buildAgentInput(c.Request.Context(), AgentModeProactive, character, recent, moments, nil)
+	result := a.decideAndExecuteConversation(c.Request.Context(), input)
+	c.JSON(http.StatusOK, SendChatResponse{Messages: result.Messages, Emotion: result.Emotion, Skipped: result.Skipped, Reason: result.Reason})
 }
 
 func loadCharacter(characterID string) (*Character, error) {
@@ -954,56 +885,85 @@ func buildProactivePrompt(ch *Character, recent []Message, moments []Moment) str
 
 func buildMomentActionPrompt(ch *Character, moments []Moment, canPost bool) string {
 	var b strings.Builder
-	b.WriteString("你正在扮演聊天角色，同时在查看用户的朋友圈。你不是 AI，不要暴露系统设定。\n")
-	b.WriteString("请判断现在是否需要对用户的朋友圈评论，或者你自己是否适合发一条朋友圈。\n\n")
+	b.WriteString("你正在扮演聊天角色，同时在查看朋友圈。你不是 AI，不要暴露系统设定。\n")
+	b.WriteString("请严格区分用户发布的朋友圈和角色自己发布的朋友圈，再判断是否评论用户，或者角色自己是否适合发一条朋友圈。\n\n")
 	b.WriteString("规则：\n")
-	b.WriteString("1. 优先考虑用户最近发且你还没互动过的朋友圈；如果适合评论就 action 设为 comment。\n")
-	b.WriteString("2. 评论要自然、克制、像微信朋友圈里的短评论，通常 6 到 24 个字。\n")
-	b.WriteString("3. 如果用户只是随手记一句、没什么好接，可以不评论，action 设为 none；系统仍会帮你点赞。\n")
-	b.WriteString("4. 如果 can_post 是 true，且没有合适评论时，优先考虑自己发一条朋友圈，不要过度保守。\n")
-	b.WriteString("5. 你发朋友圈要符合角色本人日常，可以是演艺工作、料理、天气、学习、安静生活、轻微吐槽、想起用户后的短句。\n")
-	b.WriteString("6. 你自己发朋友圈可以带图；想带图时 should_generate_image 为 true，并写 image_prompt。大约三分之一的自发朋友圈可以带图。\n")
-	b.WriteString("7. 不要为了评论而硬评论；点赞可以表达“看到了”。如果已经点赞过最近的用户动态，也可以发自己的动态。\n")
-	b.WriteString("8. 只输出 JSON，不要解释。\n\n")
+	b.WriteString("1. 【用户发布的朋友圈】才是用户近况、情绪或经历的信号，也是唯一允许 comment 的目标。\n")
+	b.WriteString("2. 【角色自己发布的朋友圈】是你本人过去发布的内容，只能用于自我记忆和避免重复；绝不能当成用户的近况、情绪或经历，也绝不能仅据此向用户提问。\n")
+	b.WriteString("3. comment 的 moment_id 必须来自【用户发布的朋友圈】，禁止评论角色自己的朋友圈。\n")
+	b.WriteString("4. 优先考虑用户最近发且你还没互动过的朋友圈；如果适合评论就 action 设为 comment。\n")
+	b.WriteString("5. 评论要自然、克制、像微信朋友圈里的短评论，通常 6 到 24 个字。\n")
+	b.WriteString("6. 如果用户只是随手记一句、没什么好接，可以不评论，action 设为 none；系统仍会帮你点赞。\n")
+	b.WriteString("7. 如果 can_post 是 true，且没有合适评论时，可以考虑自己发一条朋友圈；内容要符合角色本人日常，并避免重复角色自己最近发过的内容。\n")
+	b.WriteString("8. 你自己发朋友圈可以带图；想带图时 should_generate_image 为 true，并写 image_prompt。大约三分之一的自发朋友圈可以带图。\n")
+	b.WriteString("9. 不要为了评论而硬评论；点赞可以表达“看到了”。如果已经点赞过最近的用户动态，也可以发自己的动态。\n")
+	b.WriteString("10. 只输出 JSON，不要解释。\n\n")
 	writeCharacterProfile(&b, ch)
 	b.WriteString(fmt.Sprintf("\ncan_post: %t\n", canPost))
-	b.WriteString("最近朋友圈：\n")
-	if len(moments) == 0 {
-		b.WriteString("无\n")
-	} else {
-		for _, moment := range moments {
-			author := "用户"
-			if moment.Author == "character" {
-				author = ch.Name
-			}
-			b.WriteString(fmt.Sprintf("ID=%d 作者=%s 内容=%s", moment.ID, author, summarizePromptText(moment.Content, 180)))
-			if moment.ImageURL != "" {
-				b.WriteString(" [带图]")
-			}
-			if len(moment.Comments) > 0 {
-				commentParts := make([]string, 0, len(moment.Comments))
-				for _, comment := range moment.Comments {
-					commentAuthor := "用户"
-					if comment.Author == "character" {
-						commentAuthor = ch.Name
-					}
-					commentParts = append(commentParts, commentAuthor+":"+summarizePromptText(comment.Content, 80))
-				}
-				b.WriteString(" 评论：" + strings.Join(commentParts, "；"))
-			}
-			if len(moment.Likes) > 0 {
-				likeParts := make([]string, 0, len(moment.Likes))
-				for _, like := range moment.Likes {
-					likeAuthor := "用户"
-					if like.Author == "character" {
-						likeAuthor = ch.Name
-					}
-					likeParts = append(likeParts, likeAuthor)
-				}
-				b.WriteString(" 点赞：" + strings.Join(likeParts, "、"))
-			}
-			b.WriteString("\n")
+	writeMoment := func(moment Moment, authorRole, authorName string) {
+		b.WriteString(fmt.Sprintf("ID=%d author_role=%s 作者=%s 内容=%s", moment.ID, authorRole, authorName, summarizePromptText(moment.Content, 180)))
+		if moment.ImageURL != "" {
+			b.WriteString(" [带图]")
 		}
+		if len(moment.Comments) > 0 {
+			commentParts := make([]string, 0, len(moment.Comments))
+			for _, comment := range moment.Comments {
+				var commentAuthor string
+				switch comment.Author {
+				case "user":
+					commentAuthor = "user"
+				case "character":
+					commentAuthor = "character_self"
+				default:
+					continue
+				}
+				commentParts = append(commentParts, commentAuthor+":"+summarizePromptText(comment.Content, 80))
+			}
+			b.WriteString(" 评论：" + strings.Join(commentParts, "；"))
+		}
+		if len(moment.Likes) > 0 {
+			likeParts := make([]string, 0, len(moment.Likes))
+			for _, like := range moment.Likes {
+				var likeAuthor string
+				switch like.Author {
+				case "user":
+					likeAuthor = "user"
+				case "character":
+					likeAuthor = "character_self"
+				default:
+					continue
+				}
+				likeParts = append(likeParts, likeAuthor)
+			}
+			b.WriteString(" 点赞：" + strings.Join(likeParts, "、"))
+		}
+		b.WriteString("\n")
+	}
+
+	b.WriteString("【用户发布的朋友圈（唯一可评论目标和用户信号）】\n")
+	hasUserMoment := false
+	for _, moment := range moments {
+		if moment.Author != "user" {
+			continue
+		}
+		hasUserMoment = true
+		writeMoment(moment, "user", "用户")
+	}
+	if !hasUserMoment {
+		b.WriteString("无\n")
+	}
+
+	b.WriteString("【角色自己发布的朋友圈（仅用于自我记忆和避免重复）】\n")
+	hasCharacterMoment := false
+	for _, moment := range moments {
+		if moment.Author != "character" {
+			continue
+		}
+		hasCharacterMoment = true
+		writeMoment(moment, "character_self", ch.Name)
+	}
+	if !hasCharacterMoment {
+		b.WriteString("无\n")
 	}
 	b.WriteString(`请输出：
 {
@@ -1138,23 +1098,24 @@ func summarizePromptText(value string, limit int) string {
 
 func (a *App) callLLM(ctx context.Context, prompt string) (string, error) {
 	if a.chatConfig.APIKey == "" {
-		return "", errors.New("AI_MID_API_KEY is empty")
+		return "", errors.New("DEEPSEEK_API_KEY is empty")
 	}
-
 	body := map[string]any{
 		"model": a.chatConfig.Model,
 		"messages": []map[string]string{
 			{"role": "user", "content": prompt},
 		},
-		"temperature": a.chatConfig.Temperature,
-		"max_tokens":  a.chatConfig.MaxTokens,
+		"response_format": map[string]string{"type": "json_object"},
+		"thinking":        map[string]string{"type": "disabled"},
+		"temperature":     a.chatConfig.Temperature,
+		"max_tokens":      a.chatConfig.MaxTokens,
 	}
 	return a.callChatCompletion(ctx, body)
 }
 
 func (a *App) callChatCompletion(ctx context.Context, body map[string]any) (string, error) {
 	if a.chatConfig.APIKey == "" {
-		return "", errors.New("AI_MID_API_KEY is empty")
+		return "", errors.New("DEEPSEEK_API_KEY is empty")
 	}
 
 	data, err := json.Marshal(body)
@@ -1181,7 +1142,7 @@ func (a *App) callChatCompletion(ctx context.Context, body map[string]any) (stri
 		return "", err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("llm http %d: %s", resp.StatusCode, string(respBody))
+		return "", fmt.Errorf("deepseek http %d", resp.StatusCode)
 	}
 
 	var result struct {
@@ -1430,7 +1391,7 @@ func (a *App) loadImageBytes(ctx context.Context, source string) ([]byte, string
 		if err != nil {
 			return nil, "", err
 		}
-		resp, err := a.chatClient.Do(req)
+		resp, err := a.webClient.Do(req)
 		if err != nil {
 			return nil, "", err
 		}
@@ -1676,44 +1637,6 @@ func stickerEmotions(character *Character) []string {
 	return emotions
 }
 
-func (a *App) shouldSendSticker(ctx context.Context, character *Character, reply LLMReply) bool {
-	if character == nil {
-		return false
-	}
-
-	emotion := normalizeEmotion(reply.Emotion)
-	a.maybeWarmStickerLibraryAsync(character, emotion)
-
-	if !a.hasStickerCandidates(ctx, character, emotion) {
-		return false
-	}
-
-	cadence := a.getStickerCadence(ctx, character.ID, 12)
-	if cadence.MessagesSinceLast >= 0 && cadence.MessagesSinceLast <= 4 {
-		return false
-	}
-	if cadence.RecentCount >= 2 {
-		return false
-	}
-
-	roll := rand.Float64()
-	if reply.ShouldSendSticker {
-		return roll < 0.35
-	}
-
-	threshold := 0.06
-	switch emotion {
-	case "happy", "shy", "worried", "jealous", "teasing", "excited":
-		threshold = 0.22
-	case "sad", "angry", "sleepy":
-		threshold = 0.14
-	}
-	if cadence.RecentCount > 0 {
-		threshold *= 0.45
-	}
-	return roll < threshold
-}
-
 func (a *App) hasStickerCandidates(ctx context.Context, character *Character, emotion string) bool {
 	if len(a.getGeneratedStickerCandidates(ctx, character.ID, emotion)) > 0 {
 		return true
@@ -1762,94 +1685,9 @@ func filterRecentStickers(items []string, recent map[string]bool) []string {
 	return filtered
 }
 
-func (a *App) getStickerCadence(ctx context.Context, characterID string, limit int) StickerCadence {
-	rows, err := a.db.QueryContext(ctx, `
-SELECT message_type
-FROM messages
-WHERE character_id = ?
-ORDER BY id DESC
-LIMIT ?`, characterID, limit)
-	if err != nil {
-		log.Printf("query sticker cadence failed: %v", err)
-		return StickerCadence{MessagesSinceLast: -1}
-	}
-	defer rows.Close()
-
-	cadence := StickerCadence{MessagesSinceLast: -1}
-	index := 0
-	for rows.Next() {
-		var messageType string
-		if err := rows.Scan(&messageType); err != nil {
-			log.Printf("scan sticker cadence failed: %v", err)
-			return cadence
-		}
-		if messageType == "sticker" {
-			cadence.RecentCount++
-			if cadence.MessagesSinceLast < 0 {
-				cadence.MessagesSinceLast = index
-			}
-		}
-		index++
-	}
-	return cadence
-}
-
-func (a *App) getRecentStickerSet(ctx context.Context, characterID string, limit int) map[string]bool {
-	rows, err := a.db.QueryContext(ctx, `
-SELECT content
-FROM messages
-WHERE character_id = ? AND message_type = 'sticker'
-ORDER BY id DESC
-LIMIT ?`, characterID, limit)
-	if err != nil {
-		log.Printf("query recent stickers failed: %v", err)
-		return nil
-	}
-	defer rows.Close()
-
-	recent := make(map[string]bool)
-	for rows.Next() {
-		var content string
-		if err := rows.Scan(&content); err != nil {
-			log.Printf("scan recent sticker failed: %v", err)
-			return recent
-		}
-		recent[content] = true
-	}
-	return recent
-}
-
-func (a *App) canSendProactiveMessage(ctx context.Context, characterID string) (bool, int, error) {
-	var sender string
-	var ageSeconds sql.NullInt64
-	err := a.db.QueryRowContext(ctx, `
-SELECT sender, CAST(strftime('%s', 'now') - strftime('%s', created_at) AS INTEGER)
-FROM messages
-WHERE character_id = ?
-ORDER BY id DESC
-LIMIT 1`, characterID).Scan(&sender, &ageSeconds)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return true, 0, nil
-		}
-		return false, 60, err
-	}
-	if !ageSeconds.Valid {
-		return false, 60, nil
-	}
-
-	if ageSeconds.Int64 < 90 {
-		return false, int(90 - ageSeconds.Int64), nil
-	}
-	if sender == "character" && ageSeconds.Int64 < 360 {
-		return false, int(360 - ageSeconds.Int64), nil
-	}
-	return true, 0, nil
-}
-
 func (a *App) decideMomentAction(ctx context.Context, ch *Character, moments []Moment) (MomentAIAction, error) {
 	if a.chatConfig.APIKey == "" {
-		return MomentAIAction{}, errors.New("AI_MID_API_KEY is empty")
+		return MomentAIAction{}, errors.New("DEEPSEEK_API_KEY is empty")
 	}
 	canPost := canCharacterPostMoment(moments)
 	raw, err := a.callLLM(ctx, buildMomentActionPrompt(ch, moments, canPost))
@@ -1878,13 +1716,20 @@ func canCharacterPostMoment(moments []Moment) bool {
 		if moment.Author != "character" {
 			continue
 		}
-		createdAt, err := time.Parse("2006-01-02 15:04:05", moment.CreatedAt)
+		createdAt, err := parseApplicationTime(moment.CreatedAt)
 		if err != nil {
 			return false
 		}
 		return time.Since(createdAt) > 8*time.Minute
 	}
 	return true
+}
+
+func parseApplicationTime(value string) (time.Time, error) {
+	if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		return parsed, nil
+	}
+	return time.ParseInLocation("2006-01-02 15:04:05", value, time.Local)
 }
 
 func canCommentMoment(momentID int64, moments []Moment) bool {
@@ -1923,31 +1768,6 @@ func (a *App) markUncheckedUserMomentsSeen(ctx context.Context, moments []Moment
 	}
 }
 
-func (a *App) hasMomentCheck(ctx context.Context, momentID int64, author string) bool {
-	var exists int
-	err := a.db.QueryRowContext(ctx, `
-SELECT 1
-FROM moment_checks
-WHERE moment_id = ? AND author = ?
-LIMIT 1`, momentID, author).Scan(&exists)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		log.Printf("check moment check failed: %v", err)
-	}
-	return exists == 1
-}
-
-func (a *App) saveMomentCheck(ctx context.Context, momentID int64, author, action string) error {
-	action = strings.TrimSpace(action)
-	if action == "" {
-		action = "seen"
-	}
-	_, err := a.db.ExecContext(ctx, `
-INSERT INTO moment_checks(moment_id, author, action)
-VALUES (?, ?, ?)
-ON CONFLICT(moment_id, author) DO UPDATE SET action = excluded.action`, momentID, author, action)
-	return err
-}
-
 func hasMomentComment(moment Moment, author string) bool {
 	for _, comment := range moment.Comments {
 		if comment.Author == author {
@@ -1971,65 +1791,6 @@ func parseMomentAIAction(raw string) (MomentAIAction, error) {
 		return MomentAIAction{}, err
 	}
 	return action, nil
-}
-
-func (a *App) getGeneratedStickerCandidates(ctx context.Context, characterID, emotion string) []string {
-	rows, err := a.db.QueryContext(ctx, `
-SELECT url
-FROM sticker_assets
-WHERE character_id = ? AND emotion = ?
-ORDER BY COALESCE(last_used_at, created_at) DESC, id DESC
-LIMIT 24`, characterID, emotion)
-	if err != nil {
-		log.Printf("query sticker assets failed: %v", err)
-		return nil
-	}
-	defer rows.Close()
-
-	items := make([]string, 0)
-	for rows.Next() {
-		var url string
-		if err := rows.Scan(&url); err != nil {
-			log.Printf("scan sticker asset failed: %v", err)
-			return items
-		}
-		items = append(items, url)
-	}
-	return items
-}
-
-func (a *App) countGeneratedStickerAssets(ctx context.Context, characterID, emotion string) int {
-	var count int
-	err := a.db.QueryRowContext(ctx, `
-SELECT COUNT(1)
-FROM sticker_assets
-WHERE character_id = ? AND emotion = ?`, characterID, emotion).Scan(&count)
-	if err != nil {
-		log.Printf("count sticker assets failed: %v", err)
-		return 0
-	}
-	return count
-}
-
-func (a *App) touchStickerAsset(ctx context.Context, characterID, emotion, url string) error {
-	_, err := a.db.ExecContext(ctx, `
-UPDATE sticker_assets
-SET last_used_at = CURRENT_TIMESTAMP
-WHERE character_id = ? AND emotion = ? AND url = ?`, characterID, emotion, url)
-	return err
-}
-
-func (a *App) hasStickerAsset(ctx context.Context, characterID, emotion, url string) bool {
-	var exists int
-	err := a.db.QueryRowContext(ctx, `
-SELECT 1
-FROM sticker_assets
-WHERE character_id = ? AND emotion = ? AND url = ?
-LIMIT 1`, characterID, emotion, url).Scan(&exists)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		log.Printf("check sticker asset failed: %v", err)
-	}
-	return exists == 1
 }
 
 func (a *App) maybeWarmStickerLibrary(ctx context.Context, character *Character, emotion string) {
@@ -2065,44 +1826,43 @@ func (a *App) maybeWarmStickerLibrary(ctx context.Context, character *Character,
 	}
 }
 
-func (a *App) maybeWarmStickerLibraryAsync(character *Character, emotion string) {
+func (a *App) maybeWarmStickerLibraryAsync(ctx context.Context, character *Character, emotion string) {
 	if character == nil {
 		return
 	}
 
+	backgroundCtx, release, err := retainedUserContext(ctx)
+	if err != nil {
+		log.Printf("retain user database for sticker warm failed: %v", err)
+		return
+	}
 	characterCopy := *character
 	emotion = normalizeEmotion(emotion)
-
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-		defer cancel()
-		a.maybeWarmStickerLibrary(ctx, &characterCopy, emotion)
-	}()
-}
-
-func (a *App) warmCharacterStickerLibraryAsync(characterID string) {
-	if !getEnvBool("STICKER_CRAWL_ENABLED", true) {
+	backgroundSession, err := userSessionFromContext(backgroundCtx)
+	if err != nil {
+		release()
 		return
 	}
-	characterID = strings.TrimSpace(characterID)
-	if characterID == "" {
+
+	a.lifecycleMu.Lock()
+	if a.closing {
+		a.lifecycleMu.Unlock()
+		release()
 		return
 	}
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-		defer cancel()
+	if a.backgroundCtx == nil {
+		a.backgroundCtx, a.backgroundCancel = context.WithCancel(context.Background())
+	}
+	taskBase := contextWithUserSession(a.backgroundCtx, backgroundSession)
+	a.backgroundWG.Add(1)
+	a.lifecycleMu.Unlock()
 
-		character, err := loadCharacter(characterID)
-		if err != nil {
-			log.Printf("load character for sticker crawl failed: %v", err)
-			return
-		}
-		saved, found, err := a.crawlAndSaveStickerLibrary(ctx, character)
-		if err != nil {
-			log.Printf("startup sticker crawl failed: %v", err)
-			return
-		}
-		log.Printf("startup sticker crawl done: character=%s found=%d saved=%d", character.ID, found, saved)
+	go func() {
+		defer a.backgroundWG.Done()
+		defer release()
+		taskCtx, cancel := context.WithTimeout(taskBase, 45*time.Second)
+		defer cancel()
+		a.maybeWarmStickerLibrary(taskCtx, &characterCopy, emotion)
 	}()
 }
 
@@ -2198,7 +1958,7 @@ func (a *App) fetchStickerPage(ctx context.Context, sourceURL string) (string, e
 	req.Header.Set("User-Agent", "DimensionMessenger/1.0 (+local sticker library crawler)")
 	req.Header.Set("Accept", "text/html,application/xhtml+xml")
 
-	client := a.chatClient
+	client := a.webClient
 	if client == nil {
 		client = http.DefaultClient
 	}
@@ -2284,197 +2044,6 @@ func (a *App) buildStickerPrompt(ctx context.Context, character *Character, emot
 	return b.String()
 }
 
-func (a *App) saveStickerAsset(ctx context.Context, characterID, emotion, url, source, prompt string) error {
-	if a.hasStickerAsset(ctx, characterID, emotion, url) {
-		return nil
-	}
-	_, err := a.db.ExecContext(ctx, `
-INSERT INTO sticker_assets(character_id, emotion, url, source, prompt, last_used_at)
-VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`, characterID, emotion, url, source, prompt)
-	return err
-}
-
-func (a *App) saveMessage(ctx context.Context, characterID, sender, messageType, content string) (Message, error) {
-	res, err := a.db.ExecContext(ctx,
-		"INSERT INTO messages(character_id, sender, message_type, content) VALUES (?, ?, ?, ?)",
-		characterID, sender, messageType, content,
-	)
-	if err != nil {
-		return Message{}, err
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return Message{}, err
-	}
-	return a.getMessageByID(ctx, id)
-}
-
-func (a *App) getMessageByID(ctx context.Context, id int64) (Message, error) {
-	var msg Message
-	var createdAt string
-	err := a.db.QueryRowContext(ctx, `
-SELECT id, character_id, sender, message_type, content, created_at
-FROM messages WHERE id = ?`, id).Scan(&msg.ID, &msg.CharacterID, &msg.Sender, &msg.Type, &msg.Content, &createdAt)
-	msg.CreatedAt = createdAt
-	return msg, err
-}
-
-func (a *App) getMessages(ctx context.Context, characterID string, limit int) ([]Message, error) {
-	rows, err := a.db.QueryContext(ctx, `
-SELECT id, character_id, sender, message_type, content, created_at
-FROM messages
-WHERE character_id = ?
-ORDER BY id ASC
-LIMIT ?`, characterID, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanMessages(rows)
-}
-
-func (a *App) getMoments(ctx context.Context, characterID string, limit int) ([]Moment, error) {
-	rows, err := a.db.QueryContext(ctx, `
-SELECT id, character_id, author, content, image_url, created_at
-FROM moments
-WHERE character_id = ?
-ORDER BY id DESC
-LIMIT ?`, characterID, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	moments := make([]Moment, 0)
-	ids := make([]int64, 0)
-	for rows.Next() {
-		var moment Moment
-		if err := rows.Scan(&moment.ID, &moment.CharacterID, &moment.Author, &moment.Content, &moment.ImageURL, &moment.CreatedAt); err != nil {
-			return nil, err
-		}
-		moments = append(moments, moment)
-		ids = append(ids, moment.ID)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if len(ids) == 0 {
-		return moments, nil
-	}
-
-	comments, err := a.getMomentComments(ctx, ids)
-	if err != nil {
-		return nil, err
-	}
-	likes, err := a.getMomentLikes(ctx, ids)
-	if err != nil {
-		return nil, err
-	}
-	for i := range moments {
-		moments[i].Likes = likes[moments[i].ID]
-		moments[i].Comments = comments[moments[i].ID]
-	}
-	return moments, nil
-}
-
-func (a *App) getMomentLikes(ctx context.Context, momentIDs []int64) (map[int64][]MomentLike, error) {
-	placeholders := strings.TrimRight(strings.Repeat("?,", len(momentIDs)), ",")
-	args := make([]any, 0, len(momentIDs))
-	for _, id := range momentIDs {
-		args = append(args, id)
-	}
-	rows, err := a.db.QueryContext(ctx, `
-SELECT id, moment_id, author, created_at
-FROM moment_likes
-WHERE moment_id IN (`+placeholders+`)
-ORDER BY id ASC`, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	likes := make(map[int64][]MomentLike)
-	for rows.Next() {
-		var like MomentLike
-		if err := rows.Scan(&like.ID, &like.MomentID, &like.Author, &like.CreatedAt); err != nil {
-			return nil, err
-		}
-		likes[like.MomentID] = append(likes[like.MomentID], like)
-	}
-	return likes, rows.Err()
-}
-
-func (a *App) getMomentComments(ctx context.Context, momentIDs []int64) (map[int64][]MomentComment, error) {
-	placeholders := strings.TrimRight(strings.Repeat("?,", len(momentIDs)), ",")
-	args := make([]any, 0, len(momentIDs))
-	for _, id := range momentIDs {
-		args = append(args, id)
-	}
-	rows, err := a.db.QueryContext(ctx, `
-SELECT id, moment_id, author, content, created_at
-FROM moment_comments
-WHERE moment_id IN (`+placeholders+`)
-ORDER BY id ASC`, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	comments := make(map[int64][]MomentComment)
-	for rows.Next() {
-		var comment MomentComment
-		if err := rows.Scan(&comment.ID, &comment.MomentID, &comment.Author, &comment.Content, &comment.CreatedAt); err != nil {
-			return nil, err
-		}
-		comments[comment.MomentID] = append(comments[comment.MomentID], comment)
-	}
-	return comments, rows.Err()
-}
-
-func (a *App) saveMoment(ctx context.Context, characterID, author, content, imageURL string) (Moment, error) {
-	res, err := a.db.ExecContext(ctx,
-		"INSERT INTO moments(character_id, author, content, image_url) VALUES (?, ?, ?, ?)",
-		characterID, author, content, imageURL,
-	)
-	if err != nil {
-		return Moment{}, err
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return Moment{}, err
-	}
-	moments, err := a.getMoments(ctx, characterID, 50)
-	if err != nil {
-		return Moment{}, err
-	}
-	for _, moment := range moments {
-		if moment.ID == id {
-			return moment, nil
-		}
-	}
-	return Moment{}, sql.ErrNoRows
-}
-
-func (a *App) saveMomentLike(ctx context.Context, momentID int64, author string) (MomentLike, bool, error) {
-	res, err := a.db.ExecContext(ctx,
-		"INSERT OR IGNORE INTO moment_likes(moment_id, author) VALUES (?, ?)",
-		momentID, author,
-	)
-	if err != nil {
-		return MomentLike{}, false, err
-	}
-	rowsAffected, err := res.RowsAffected()
-	if err != nil {
-		return MomentLike{}, false, err
-	}
-	var like MomentLike
-	err = a.db.QueryRowContext(ctx, `
-SELECT id, moment_id, author, created_at
-FROM moment_likes
-WHERE moment_id = ? AND author = ?`, momentID, author).Scan(&like.ID, &like.MomentID, &like.Author, &like.CreatedAt)
-	return like, rowsAffected > 0, err
-}
-
 func (a *App) likeLatestUserMoment(ctx context.Context, moments []Moment) (MomentLike, bool, error) {
 	for _, moment := range moments {
 		if moment.Author != "user" || hasMomentLike(moment, "character") {
@@ -2492,56 +2061,6 @@ func hasMomentLike(moment Moment, author string) bool {
 		}
 	}
 	return false
-}
-
-func (a *App) saveMomentComment(ctx context.Context, momentID int64, author, content string) (MomentComment, error) {
-	res, err := a.db.ExecContext(ctx,
-		"INSERT INTO moment_comments(moment_id, author, content) VALUES (?, ?, ?)",
-		momentID, author, content,
-	)
-	if err != nil {
-		return MomentComment{}, err
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return MomentComment{}, err
-	}
-	var comment MomentComment
-	err = a.db.QueryRowContext(ctx, `
-SELECT id, moment_id, author, content, created_at
-FROM moment_comments
-WHERE id = ?`, id).Scan(&comment.ID, &comment.MomentID, &comment.Author, &comment.Content, &comment.CreatedAt)
-	return comment, err
-}
-
-func (a *App) getRecentMessages(ctx context.Context, characterID string, limit int) ([]Message, error) {
-	rows, err := a.db.QueryContext(ctx, `
-SELECT id, character_id, sender, message_type, content, created_at
-FROM (
-  SELECT id, character_id, sender, message_type, content, created_at
-  FROM messages
-  WHERE character_id = ?
-  ORDER BY id DESC
-  LIMIT ?
-)
-ORDER BY id ASC`, characterID, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanMessages(rows)
-}
-
-func scanMessages(rows *sql.Rows) ([]Message, error) {
-	messages := make([]Message, 0)
-	for rows.Next() {
-		var msg Message
-		if err := rows.Scan(&msg.ID, &msg.CharacterID, &msg.Sender, &msg.Type, &msg.Content, &msg.CreatedAt); err != nil {
-			return nil, err
-		}
-		messages = append(messages, msg)
-	}
-	return messages, rows.Err()
 }
 
 func loadDotEnv(path string) error {
@@ -2600,19 +2119,8 @@ func getDataDir() string {
 	return getEnv("DATA_DIR", "data")
 }
 
-func getDatabasePath() string {
-	if value := strings.TrimSpace(os.Getenv("DATABASE_PATH")); value != "" {
-		return value
-	}
-	return getEnv("DB_PATH", "dimension.db")
-}
-
-func ensureParentDir(path string) error {
-	dir := filepath.Dir(path)
-	if dir == "." || dir == "" {
-		return nil
-	}
-	return os.MkdirAll(dir, 0755)
+func getDatabaseURL() string {
+	return strings.TrimSpace(getEnv("DATABASE_URL", ""))
 }
 
 func getEnvInt(key string, fallback int) int {

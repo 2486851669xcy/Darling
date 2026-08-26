@@ -1,7 +1,14 @@
 .env
+.env.*
+!.env.example
 *.db
 *.db-*
 dimension.db
 .DS_Store
+/dimension-messenger-demo
+/darling
+runtime/
+.learnings/
 data/generated/
 data/stickers/
+*.orig

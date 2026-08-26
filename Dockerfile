@@ -17,7 +17,6 @@ COPY --chown=nonroot:nonroot web /app/web
 COPY --chown=nonroot:nonroot data /app/data
 
 ENV PORT=8080
-ENV DATABASE_PATH=/app/data/runtime/dimension.db
 
 EXPOSE 8080
 

@@ -23,6 +23,16 @@ const notificationToast = document.getElementById('notificationToast');
 const notificationAvatar = document.getElementById('notificationAvatar');
 const notificationTitle = document.getElementById('notificationTitle');
 const notificationBody = document.getElementById('notificationBody');
+const wechatLoginBtn = document.getElementById('wechatLoginBtn');
+const wechatLoginIcon = document.getElementById('wechatLoginIcon');
+const wechatUserAvatar = document.getElementById('wechatUserAvatar');
+const wechatLoginTitle = document.getElementById('wechatLoginTitle');
+const wechatLoginDetail = document.getElementById('wechatLoginDetail');
+const wechatLoginStatus = document.getElementById('wechatLoginStatus');
+const wechatLoginFeedback = document.getElementById('wechatLoginFeedback');
+const wechatAccountActions = document.getElementById('wechatAccountActions');
+const wechatLogoutBtn = document.getElementById('wechatLogoutBtn');
+const wechatLogoutLabel = document.getElementById('wechatLogoutLabel');
 
 const state = {
   character: {
@@ -54,6 +64,7 @@ const state = {
   lastUserBubble: null,
   pendingUserRows: [],
   typingBubble: null,
+  session: null,
 };
 
 const proactiveDelayRange = {
@@ -126,6 +137,141 @@ function playMessageSound(kind) {
 
 window.addEventListener('pointerdown', unlockAudio, { once: true });
 window.addEventListener('keydown', unlockAudio, { once: true });
+
+function normalizeWeChatSession(data) {
+  const rawUser = data && data.user && typeof data.user === 'object' ? data.user : {};
+  return {
+    authenticated: data && data.authenticated === true,
+    wechatEnabled: data && data.wechat_enabled === true,
+    user: {
+      nickname: typeof rawUser.nickname === 'string' ? rawUser.nickname.trim() : '',
+      avatarUrl: typeof rawUser.avatar_url === 'string' ? rawUser.avatar_url.trim() : '',
+    },
+  };
+}
+
+function setWeChatLoginFeedback(message, kind = '') {
+  wechatLoginFeedback.textContent = message;
+  wechatLoginFeedback.classList.toggle('is-success', kind === 'success');
+  wechatLoginFeedback.classList.toggle('is-error', kind === 'error');
+}
+
+function setWeChatLogoutBusy(isBusy) {
+  wechatLogoutBtn.disabled = isBusy;
+  wechatLogoutBtn.setAttribute('aria-busy', String(isBusy));
+  wechatLogoutLabel.textContent = isBusy ? '正在退出…' : '退出微信登录';
+}
+
+function renderWeChatLoginState(session) {
+  wechatLoginBtn.classList.remove('is-checking', 'is-ready', 'is-unavailable', 'is-authenticated');
+  wechatAccountActions.hidden = !session.authenticated;
+  setWeChatLogoutBusy(false);
+
+  if (session.authenticated) {
+    const nickname = session.user.nickname || '微信用户';
+    const hasAvatar = Boolean(session.user.avatarUrl);
+
+    wechatLoginBtn.classList.add('is-authenticated');
+    wechatLoginBtn.disabled = true;
+    wechatLoginBtn.setAttribute('aria-label', '已登录微信账号' + (session.user.nickname ? '：' + session.user.nickname : ''));
+    wechatLoginTitle.textContent = nickname;
+    wechatLoginDetail.textContent = '已通过微信登录，当前数据已绑定到此账号。';
+    wechatLoginStatus.textContent = '已登录';
+    wechatLoginIcon.hidden = hasAvatar;
+    wechatUserAvatar.hidden = !hasAvatar;
+
+    if (hasAvatar) {
+      wechatUserAvatar.src = session.user.avatarUrl;
+      wechatUserAvatar.alt = nickname + '的微信头像';
+    } else {
+      wechatUserAvatar.removeAttribute('src');
+      wechatUserAvatar.alt = '';
+    }
+    return;
+  }
+
+  wechatUserAvatar.hidden = true;
+  wechatUserAvatar.removeAttribute('src');
+  wechatUserAvatar.alt = '';
+  wechatLoginIcon.hidden = false;
+  wechatLoginTitle.textContent = '微信扫码登录';
+
+  if (!session.wechatEnabled) {
+    wechatLoginBtn.classList.add('is-unavailable');
+    wechatLoginBtn.disabled = true;
+    wechatLoginBtn.setAttribute('aria-label', '微信扫码登录尚未启用');
+    wechatLoginDetail.textContent = '管理员尚未启用微信扫码登录；当前继续使用本机匿名身份。';
+    wechatLoginStatus.textContent = '未启用';
+    return;
+  }
+
+  wechatLoginBtn.classList.add('is-ready');
+  wechatLoginBtn.disabled = false;
+  wechatLoginBtn.setAttribute('aria-label', '使用微信扫码登录');
+  wechatLoginDetail.textContent = '点击后前往微信开放平台扫码，成功后返回当前页面。';
+  wechatLoginStatus.textContent = '去登录';
+}
+
+function consumeWeChatLoginCallback() {
+  const url = new URL(window.location.href);
+  const result = url.searchParams.get('wechat_login');
+  if (result === null) {
+    return null;
+  }
+
+  url.searchParams.delete('wechat_login');
+  window.history.replaceState(window.history.state, '', [url.pathname, url.search, url.hash].join(''));
+  return result === 'success' || result === 'error' ? result : null;
+}
+
+function applyWeChatLoginCallback(result, session) {
+  if (result === 'error') {
+    setWeChatLoginFeedback('微信登录未完成，请重新扫码尝试。', 'error');
+    return;
+  }
+  if (result === 'success' && session.authenticated) {
+    setWeChatLoginFeedback('微信登录成功，登录状态已同步。', 'success');
+    return;
+  }
+  if (result === 'success') {
+    setWeChatLoginFeedback('微信已返回，但登录状态尚未生效，请重新扫码尝试。', 'error');
+  }
+}
+
+async function ensureSession() {
+  const response = await fetch('/api/session', {
+    credentials: 'same-origin',
+    cache: 'no-store',
+  });
+  if (response.status === 503) {
+    const statusResponse = await fetch('/api/auth/wechat/status', {
+      credentials: 'same-origin',
+      cache: 'no-store',
+    }).catch(() => null);
+    const status = statusResponse && statusResponse.ok ? await statusResponse.json().catch(() => null) : null;
+    if (status && status.wechat_enabled === true) {
+      const session = normalizeWeChatSession({
+        authenticated: false,
+        wechat_enabled: true,
+      });
+      state.session = session;
+      renderWeChatLoginState(session);
+      setWeChatLoginFeedback('当前匿名会话容量已满，聊天和朋友圈暂不可用；你仍可使用微信扫码登录。', 'error');
+      return session;
+    }
+  }
+  if (!response.ok) {
+    throw new Error('初始化用户身份失败');
+  }
+  const data = await response.json().catch(() => null);
+  if (!data || data.ok !== true) {
+    throw new Error('用户身份响应无效');
+  }
+  const session = normalizeWeChatSession(data);
+  state.session = session;
+  renderWeChatLoginState(session);
+  return session;
+}
 
 async function fetchCharacter() {
   const response = await fetch(`/api/character?character_id=${characterId}`);
@@ -561,7 +707,8 @@ function createBubble(message) {
   } else {
     const status = document.createElement('span');
     status.className = 'bubble-read-status';
-    status.innerHTML = '<span class="read-check" aria-hidden="true">✓</span>';
+    status.setAttribute('aria-hidden', 'true');
+    status.innerHTML = '<span class="read-check" aria-hidden="true">✓</span><span class="read-label">已读</span>';
     row.appendChild(status);
     row.appendChild(bubble);
     row.appendChild(avatar);
@@ -608,6 +755,31 @@ function hasLaterCharacterMessage(messages, index) {
   return messages.slice(index + 1).some((message) => message.sender === 'character');
 }
 
+function setMessageRowRead(row, isRead) {
+  const status = row?.querySelector('.bubble-read-status');
+  if (!status) return;
+
+  status.classList.toggle('read', isRead);
+  status.setAttribute('aria-hidden', String(!isRead));
+}
+
+function markUserMessageRead(message, row) {
+  if (message?.sender !== 'user') return;
+  message.read = true;
+  setMessageRowRead(row, true);
+}
+
+function markVisibleUserMessagesRead() {
+  state.messages.forEach((message) => {
+    if (message.sender === 'user') {
+      message.read = true;
+    }
+  });
+  messageList.querySelectorAll('.message-row.user').forEach((row) => {
+    setMessageRowRead(row, true);
+  });
+}
+
 function renderMessages(messages) {
   messageList.innerHTML = '';
   state.messages = Array.isArray(messages) ? messages : [];
@@ -629,8 +801,8 @@ function renderMessages(messages) {
       messageList.appendChild(createTimeSeparator(message));
     }
     const row = createBubble(message);
-    if (message.sender === 'user' && hasLaterCharacterMessage(state.messages, index)) {
-      row.querySelector('.bubble-read-status')?.classList.add('read');
+    if (message.sender === 'user' && (message.read === true || hasLaterCharacterMessage(state.messages, index))) {
+      markUserMessageRead(message, row);
     }
     messageList.appendChild(row);
     if (message.sender === 'user') {
@@ -647,6 +819,9 @@ function appendMessage(message) {
     empty.remove();
   }
   state.messages.push(message);
+  if (message.sender === 'character') {
+    markVisibleUserMessagesRead();
+  }
   updateConversationSummary();
   if (shouldShowTimeSeparator(message)) {
     messageList.appendChild(createTimeSeparator(message));
@@ -670,8 +845,7 @@ function randomBetween(min, max) {
 
 function markPendingUserMessagesRead(batch) {
   batch.forEach((item) => {
-    const row = item.row;
-    row.querySelector('.bubble-read-status')?.classList.add('read');
+    markUserMessageRead(item.message, item.row);
   });
   state.pendingUserRows = [];
 }
@@ -679,6 +853,7 @@ function markPendingUserMessagesRead(batch) {
 function clearInlineReadStatus() {
   document.querySelectorAll('.bubble-read-status').forEach((status) => {
     status.classList.remove('read');
+    status.setAttribute('aria-hidden', 'true');
   });
 }
 
@@ -985,6 +1160,64 @@ tabButtons.forEach((button) => {
   });
 });
 
+wechatLoginBtn.addEventListener('click', () => {
+  if (!state.session || !state.session.wechatEnabled || state.session.authenticated) {
+    return;
+  }
+
+  wechatLoginBtn.disabled = true;
+  wechatLoginBtn.classList.remove('is-ready');
+  wechatLoginBtn.classList.add('is-checking');
+  wechatLoginBtn.setAttribute('aria-label', '正在前往微信扫码登录');
+  wechatLoginStatus.textContent = '跳转中';
+  setWeChatLoginFeedback('正在打开微信扫码登录…');
+  window.location.assign('/api/auth/wechat/start');
+});
+
+wechatLogoutBtn.addEventListener('click', async () => {
+  if (!state.session || !state.session.authenticated) {
+    return;
+  }
+
+  setWeChatLogoutBusy(true);
+  setWeChatLoginFeedback('正在退出微信登录…');
+
+  try {
+    const response = await fetch('/api/auth/logout', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { Accept: 'application/json' },
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      const message = typeof data.error === 'string' && data.error.trim()
+        ? data.error.trim()
+        : '退出微信登录失败，请稍后重试。';
+      throw new Error(message);
+    }
+
+    let session;
+    try {
+      session = await ensureSession();
+    } catch {
+      throw new Error('已退出微信登录，但状态刷新失败，请刷新页面。');
+    }
+    if (session.authenticated) {
+      throw new Error('退出状态尚未生效，请稍后重试。');
+    }
+    setWeChatLoginFeedback('已退出微信登录，可扫码登录其他微信账号。', 'success');
+  } catch (error) {
+    setWeChatLoginFeedback(error instanceof Error && error.message ? error.message : '退出微信登录失败，请稍后重试。', 'error');
+    setWeChatLogoutBusy(false);
+  }
+});
+
+window.addEventListener('pageshow', (event) => {
+  if (event.persisted && state.session) {
+    renderWeChatLoginState(state.session);
+  }
+});
+
 postMomentBtn.addEventListener('click', async () => {
   const content = momentInput.value.trim();
   if (!content) return;
@@ -1045,17 +1278,30 @@ function applyCharacterUI(character) {
 }
 
 (async function init() {
+  const wechatLoginCallback = consumeWeChatLoginCallback();
+  const initialView = wechatLoginCallback ? 'profile' : 'messages';
+  let wechatLoginCallbackHandled = false;
+
   try {
+    const session = await ensureSession();
+    if (wechatLoginCallback) {
+      setMainView(initialView);
+      applyWeChatLoginCallback(wechatLoginCallback, session);
+      wechatLoginCallbackHandled = true;
+    }
     const [character, messages, moments] = await Promise.all([fetchCharacter(), fetchMessages(), fetchMoments()]);
     applyCharacterUI(character);
     state.messages = messages;
     renderMoments(moments);
     updateConversationSummary();
-    setMainView('messages');
+    setMainView(initialView);
     scheduleProactiveMessage(randomDelay(firstProactiveDelayRange));
     scheduleMomentCheck(randomDelay(momentCheckDelayRange));
   } catch (error) {
-    setMainView('messages');
+    setMainView(initialView);
+    if (!state.session && wechatLoginCallback && !wechatLoginCallbackHandled) {
+      setWeChatLoginFeedback('无法确认微信登录状态，请刷新页面后重试。', 'error');
+    }
     conversationPreview.textContent = `初始化失败：${error.message}`;
   }
 })();

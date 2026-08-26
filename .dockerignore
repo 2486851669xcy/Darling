@@ -1,9 +1,16 @@
 .git
 .idea
 .env
+.env.*
+!.env.example
 *.db
 *.db-*
 dimension.db
 dimension-messenger-demo.exe
+dimension-messenger-demo
+darling
+*.orig
+runtime/
+.learnings/
 data/generated/
 data/stickers/

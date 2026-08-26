@@ -7,21 +7,24 @@ jobs:
   serve:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: darling
+          POSTGRES_USER: darling
+          POSTGRES_PASSWORD: darling_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U darling -d darling"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     env:
       PORT: "8080"
-      DATABASE_PATH: ./runtime/dimension.db
-      AI_MID_API_KEY: ${{ secrets.AI_MID_API_KEY }}
-      AI_MID_BASE_URL: ${{ secrets.AI_MID_BASE_URL }}
-      AI_MID_MODEL: ${{ secrets.AI_MID_MODEL }}
-      AI_MID_TEMPERATURE: ${{ secrets.AI_MID_TEMPERATURE }}
-      AI_MID_MAX_TOKENS: ${{ secrets.AI_MID_MAX_TOKENS }}
-      AI_MID_TIMEOUT: ${{ secrets.AI_MID_TIMEOUT }}
-      AI_HIGH_API_KEY: ${{ secrets.AI_HIGH_API_KEY }}
-      AI_HIGH_BASE_URL: ${{ secrets.AI_HIGH_BASE_URL }}
-      AI_HIGH_MODEL: ${{ secrets.AI_HIGH_MODEL }}
-      AI_HIGH_TEMPERATURE: ${{ secrets.AI_HIGH_TEMPERATURE }}
-      AI_HIGH_MAX_TOKENS: ${{ secrets.AI_HIGH_MAX_TOKENS }}
-      AI_HIGH_TIMEOUT: ${{ secrets.AI_HIGH_TIMEOUT }}
+      DATABASE_URL: postgresql://darling:darling_ci@127.0.0.1:5432/darling?sslmode=disable
+      TEST_DATABASE_URL: postgresql://darling:darling_ci@127.0.0.1:5432/darling?sslmode=disable
 
     steps:
       - uses: actions/checkout@v4
@@ -30,6 +33,9 @@ jobs:
         with:
           go-version: "1.22"
           cache: true
+
+      - name: Test
+        run: go test ./...
 
       - name: Build app
         run: go build -o darling .
@@ -41,14 +47,29 @@ jobs:
 
       - name: Start app and tunnel
         shell: bash
+        env:
+          WECHAT_APP_ID: ${{ secrets.WECHAT_APP_ID }}
+          WECHAT_APP_SECRET: ${{ secrets.WECHAT_APP_SECRET }}
+          WECHAT_REDIRECT_URL: ${{ secrets.WECHAT_REDIRECT_URL }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          DEEPSEEK_BASE_URL: ${{ secrets.DEEPSEEK_BASE_URL }}
+          DEEPSEEK_MODEL: ${{ secrets.DEEPSEEK_MODEL }}
+          DEEPSEEK_TEMPERATURE: ${{ secrets.DEEPSEEK_TEMPERATURE }}
+          DEEPSEEK_MAX_TOKENS: ${{ secrets.DEEPSEEK_MAX_TOKENS }}
+          DEEPSEEK_TIMEOUT: ${{ secrets.DEEPSEEK_TIMEOUT }}
+          AI_HIGH_API_KEY: ${{ secrets.AI_HIGH_API_KEY }}
+          AI_HIGH_BASE_URL: ${{ secrets.AI_HIGH_BASE_URL }}
+          AI_HIGH_MODEL: ${{ secrets.AI_HIGH_MODEL }}
+          AI_HIGH_TEMPERATURE: ${{ secrets.AI_HIGH_TEMPERATURE }}
+          AI_HIGH_MAX_TOKENS: ${{ secrets.AI_HIGH_MAX_TOKENS }}
+          AI_HIGH_TIMEOUT: ${{ secrets.AI_HIGH_TIMEOUT }}
         run: |
           set -euo pipefail
-          mkdir -p runtime
           ./darling > app.log 2>&1 &
           app_pid=$!
 
           for i in {1..30}; do
-            if curl -fsS "http://127.0.0.1:${PORT}/api/character?character_id=luna" >/dev/null; then
+            if curl -fsS "http://127.0.0.1:${PORT}/api/session" >/dev/null; then
               break
             fi
             if ! kill -0 "$app_pid" 2>/dev/null; then
